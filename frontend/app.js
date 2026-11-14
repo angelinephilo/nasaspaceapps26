@@ -311,8 +311,22 @@ function readFutureForm() {
 
 /* ======================= Requests ======================= */
 
+// A dropped connection (Safari: "Load failed", Chrome: "Failed to fetch") rather than a server error
+class NetworkError extends Error {}
+
 async function api(path, options = {}) {
-  const res = await fetch(API + path, { headers: { "Content-Type": "application/json" }, ...options });
+  let res;
+  try {
+    res = await fetch(API + path, { headers: { "Content-Type": "application/json" }, ...options });
+  } catch (e) {
+    throw new NetworkError("Lost connection to the server. Check your internet and keep this page open while it loads.");
+  }
+  if (res.status === 502 || res.status === 503 || res.status === 504) {
+    // Render returns these while the free server is waking up
+    let detail = null;
+    try { detail = (await res.clone().json()).detail; } catch { /* HTML page from the host */ }
+    if (!detail) throw new NetworkError("The server is starting up.");
+  }
   let body = null;
   try { body = await res.json(); } catch { /* not JSON */ }
   if (!res.ok) {
@@ -322,42 +336,76 @@ async function api(path, options = {}) {
   return body;
 }
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Retry only dropped connections (not real errors). Waits grow: 5 s, 10 s, 20 s…
+async function withRetry(fn, { tries, runId, onRetry }) {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await fn();
+    } catch (e) {
+      if (!(e instanceof NetworkError) || attempt >= tries || runId !== state.runId) throw e;
+      onRetry && onRetry(attempt);
+      await sleep(5000 * 2 ** (attempt - 1));
+    }
+  }
+}
+
 async function runHistorical(params) {
   const runId = startResults(params, "historical");
   setProgress("Sending your request to NASA Giovanni…", 2);
   try {
-    const { job } = await api("/api/historical", { method: "POST", body: JSON.stringify({ ...params, geometry: state.geometry }) });
+    // Several tries: the first request after the free server sleeps can take ~1 minute.
+    // Re-sending is safe: the backend reuses the NASA job for identical requests.
+    const { job } = await withRetry(
+      () => api("/api/historical", { method: "POST", body: JSON.stringify({ ...params, geometry: state.geometry }) }),
+      { tries: 4, runId, onRetry: () => setProgress("Waking up the server, this can take about a minute…", 2) },
+    );
     if (runId !== state.runId) return;
     const started = Date.now();
+    let misses = 0;  // checks in a row that lost the connection
     const poll = async () => {
       if (runId !== state.runId) return;
       try {
         const r = await api(`/api/historical/${job}`);
+        misses = 0;
         if (runId !== state.runId) return;
         if (r.status === "successful") return showResult(r);
-        if (r.status === "failed") return showError(r.message || "NASA could not process this request.");
+        if (r.status === "failed") return showError(r.message || "NASA could not process this request.", true);
         setProgress(`NASA is calculating the average for your area… ${r.progress || 0}%`, Math.max(5, r.progress || 0));
-        if (Date.now() - started > 15 * 60 * 1000) return showError("This is taking too long. Try a shorter time period.");
-        state.pollTimer = setTimeout(poll, 4000);
       } catch (e) {
-        showError(e.message);
+        if (runId !== state.runId) return;
+        if (!(e instanceof NetworkError) || ++misses > 8) return showError(e.message, true);
+        setProgress("Connection lost, reconnecting… (NASA keeps working on your request)", null);
       }
+      if (Date.now() - started > 15 * 60 * 1000) return showError("This is taking too long. Try a shorter time period.", true);
+      state.pollTimer = setTimeout(poll, misses ? 6000 : 4000);
     };
     state.pollTimer = setTimeout(poll, 3000);
   } catch (e) {
-    if (runId === state.runId) showError(e.message);
+    if (runId === state.runId) showError(e.message, true);
   }
 }
 
 async function runFuture(params) {
   const runId = startResults(params, "future");
-  setProgress("Collecting climate projections from three NASA climate models. This can take a minute or two…", null);
+  setProgress("Collecting climate projections from three NASA climate models. This can take a minute or two. Please keep this page open…", null);
   try {
-    const r = await api("/api/future", { method: "POST", body: JSON.stringify({ ...params, geometry: state.geometry }) });
+    // If the connection drops, asking again is cheap when the server already finished (it keeps results).
+    const r = await withRetry(
+      () => api("/api/future", { method: "POST", body: JSON.stringify({ ...params, geometry: state.geometry }) }),
+      { tries: 3, runId, onRetry: () => setProgress("Connection lost, trying again…", null) },
+    );
     if (runId === state.runId) showResult(r);
   } catch (e) {
-    if (runId === state.runId) showError(e.message);
+    if (runId === state.runId) showError(e.message, true);
   }
+}
+
+function retryLast() {
+  const req = state.lastRequest;
+  if (!req) return;
+  if (req.kind === "historical") runHistorical(req.params); else runFuture(req.params);
 }
 
 function startResults(params, kind) {
@@ -394,9 +442,18 @@ function setProgress(text, pct) {
   else fill.style.width = "";
 }
 
-function showError(msg) {
+function showError(msg, canRetry = false) {
   $("progress").classList.add("hidden");
-  $("results-error").textContent = `Sorry, something went wrong: ${msg}`;
+  const el = $("results-error");
+  el.textContent = `Sorry, something went wrong: ${msg} `;
+  if (canRetry && state.lastRequest) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "primary-btn";
+    b.textContent = "Try again";
+    b.onclick = retryLast;
+    el.appendChild(b);
+  }
 }
 
 /* ======================= Results ======================= */
@@ -592,6 +649,10 @@ function boundsCenter(pts) {
 /* ======================= Wire up ======================= */
 
 document.addEventListener("DOMContentLoaded", () => {
+  // Wake the backend now (free hosting sleeps when idle), so it is ready by the time
+  // the farmer has picked a location and options.
+  fetch(API + "/api/health").catch(() => {});
+
   initHistoricalForm();
   initFutureForm();
 
