@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AgriClimate Explorer</title>
+  <link rel="stylesheet" href="style.css" />
+  <script src="https://unpkg.com/terra-draw@1.0.0/dist/terra-draw.umd.js"></script>
+  <script src="https://unpkg.com/terra-draw-google-maps-adapter@1.0.0/dist/terra-draw-google-maps-adapter.umd.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+  <!-- Persistent Top Navigation -->
+  <header class="navbar">
+    <div class="nav-left">
+      <button id="btn-back" class="nav-btn hidden" onclick="goBack()">← Back</button>
+      <button class="nav-btn" onclick="goHome()">Home</button>
+    </div>
+    <div class="nav-right">
+      <button class="nav-btn" onclick="openModal('how-modal')">How it Works</button>
+      <button class="nav-btn" onclick="openModal('about-modal')">About?</button>
+    </div>
+  </header>
+
+  <!-- STEP 1: Interactive Map & Location Search -->
+  <main id="step-1" class="step-view active">
+    <div class="map-toolbar">
+      <input id="location-search" type="text" placeholder="Search town, farm, or paste lat, lng (e.g. 1.3521, 103.8198)" />
+      <button onclick="searchLocation()">Search</button>
+      <button id="btn-draw-poly" onclick="startPolygonDraw()">Draw Region Polygon</button>
+      <button id="btn-step1-next" class="primary-btn" disabled onclick="goToStep(2)">Confirm Location →</button>
+    </div>
+    <div id="map"></div>
+  </main>
+
+  <!-- STEP 2: Choose Analysis -->
+  <section id="step-2" class="step-view centered-panel">
+    <h2>Choose Analysis Type</h2>
+    <p id="selected-location-summary" class="subtitle"></p>
+    <div class="card-grid">
+      <div class="choice-card" onclick="selectAnalysis('historical')">
+        <h3>Historical Trends</h3>
+        <p>Explore how environmental conditions have changed over the past decades.</p>
+      </div>
+      <div class="choice-card" onclick="selectAnalysis('future')">
+        <h3>Future Scenarios</h3>
+        <p>Investigate how temperature, rainfall and other environmental conditions may change in the future.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- STEP 3A: Historical Trends Configuration -->
+  <section id="step-3-historical" class="step-view centered-panel">
+    <h2>Historical Trends Configuration</h2>
+    <div class="form-group">
+      <label>Select Variable</label>
+      <select id="hist-variable">
+        <option value="precipitation">Precipitation</option>
+        <option value="soil_moisture">Soil Moisture</option>
+        <option value="air_temp">Air Temperature</option>
+        <option value="evapotranspiration">Total Land Evapotranspiration</option>
+        <option value="min_temp">Minimum Temperature</option>
+        <option value="max_temp">Maximum Temperature</option>
+      </select>
+    </div>
+
+    <div class="form-row">
+      <div class="form-group">
+        <label>Start (MM/YYYY)</label>
+        <input type="month" id="hist-start" value="2015-01" />
+      </div>
+      <div class="form-group">
+        <label>End (MM/YYYY)</label>
+        <input type="month" id="hist-end" value="2025-12" />
+      </div>
+    </div>
+
+    <div class="form-group">
+      <label>Data Frequency</label>
+      <select id="hist-frequency">
+        <option value="monthly">Monthly</option>
+        <option value="yearly">Yearly</option>
+        <option value="daily">Daily (Best for ranges under 2 years)</option>
+      </select>
+    </div>
+
+    <button class="primary-btn" onclick="submitAnalysis('historical')">Generate Historical Chart</button>
+  </section>
+
+  <!-- STEP 3B: Future Scenarios (SSP) Configuration -->
+  <section id="step-3-future" class="step-view centered-panel">
+    <h2>Future Climate Scenarios</h2>
+    <div class="form-group">
+      <label>Select Variable</label>
+      <select id="fut-variable">
+        <option value="precipitation">Precipitation</option>
+        <option value="min_temp">Minimum Temperature</option>
+        <option value="max_temp">Maximum Temperature</option>
+      </select>
+    </div>
+
+    <div class="form-group">
+      <label>Future Period</label>
+      <select id="fut-period" onchange="toggleCustomYears()">
+        <option value="5">Next 5 years (2026–2031)</option>
+        <option value="10">Next 10 years (2026–2036)</option>
+        <option value="15">Next 15 years (2026–2041)</option>
+        <option value="20">Next 20 years (2026–2046)</option>
+        <option value="25">Next 25 years (2026–2051)</option>
+        <option value="30">Next 30 years (2026–2056)</option>
+        <option value="custom">Custom range (select years)</option>
+      </select>
+    </div>
+
+    <div id="custom-years-row" class="form-row hidden">
+      <div class="form-group">
+        <label>Start Year</label>
+        <input type="number" id="fut-start-year" min="2026" max="2099" value="2030" />
+      </div>
+      <div class="form-group">
+        <label>End Year</label>
+        <input type="number" id="fut-end-year" min="2027" max="2100" value="2050" />
+      </div>
+    </div>
+
+    <div class="form-group">
+      <label>SSP Scenario</label>
+      <select id="fut-ssp">
+        <option value="ssp126">SSP1-2.6 (Sustainability / Low Emissions)</option>
+        <option value="ssp245" selected>SSP2-4.5 (Middle of the Road / Moderate)</option>
+        <option value="ssp370">SSP3-7.0 (Regional Rivalry / High Emissions)</option>
+        <option value="ssp585">SSP5-8.5 (Fossil-Fueled Development / Very High)</option>
+      </select>
+    </div>
+
+    <button class="primary-btn" onclick="submitAnalysis('future')">Generate Future Projection</button>
+  </section>
+
+  <!-- STEP 4: Results View -->
+  <section id="step-4" class="step-view centered-panel">
+    <h2 id="results-title">Analysis Results</h2>
+    <p id="status-banner">Submitting request to NASA Harmony...</p>
+    <div class="chart-box">
+      <canvas id="results-chart"></canvas>
+    </div>
+  </section>
+
+  <!-- Modals for About & How it Works -->
+  <div id="how-modal" class="modal hidden">
+    <div class="modal-content">
+      <h3>How it Works</h3>
+      <ol>
+        <li><strong>Select Region:</strong> Search a place/coordinates, click a point on the map, or draw your farm boundary polygon.</li>
+        <li><strong>Choose Analysis:</strong> Pick <em>Historical Trends</em> (past satellite data) or <em>Future Scenarios</em> (CMIP6 climate projections).</li>
+        <li><strong>Configure & View:</strong> Select your crop-relevant variable and timeframe to generate a tailored chart.</li>
+      </ol>
+      <button onclick="closeModals()">Close</button>
+    </div>
+  </div>
+
+  <div id="about-modal" class="modal hidden">
+    <div class="modal-content">
+      <h3>About This Tool</h3>
+      <p>Powered by NASA Earthdata (Giovanni / Harmony API) and Google Maps, helping farmers assess historical weather patterns and future climate risks for their fields.</p>
+      <button onclick="closeModals()">Close</button>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+  <script async defer
+    src="https://maps.googleapis.com/maps/api/js?key=YOUR_GOOGLE_MAPS_API_KEY&libraries=places&callback=initMap">
+  </script>
+</body>
+</html>

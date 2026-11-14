@@ -1,0 +1,14 @@
+{
+  "hosting": {
+    "public": "frontend",
+    "rewrites": [
+      {
+        "source": "/api/**",
+        "run": {
+          "serviceId": "agri-harmony-api",
+          "region": "us-central1"
+        }
+      }
+    ]
+  }
+}

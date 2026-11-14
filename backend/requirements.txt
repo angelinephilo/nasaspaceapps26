@@ -1,0 +1,7 @@
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+harmony-py==0.4.12
+xarray==2024.9.0
+netCDF4==1.7.1
+shapely==2.0.6
+pydantic==2.9.2
