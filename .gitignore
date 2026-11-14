@@ -1,0 +1,17 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Secrets
+.env
+config.js
+!config.example.js
+
+# Tools / OS
+.firebase/
+.vscode/
+.DS_Store
+Thumbs.db

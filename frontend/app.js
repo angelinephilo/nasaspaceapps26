@@ -28,7 +28,7 @@ const state = {
   runId: 0,
 };
 
-let map, geocoder, pinMarker, youMarker, farmPolygon, chart;
+let map, geocoder, pinMarker, youMarker, farmPolygon, cornerLine, chart;
 const $ = (id) => document.getElementById(id);
 
 /* ======================= Google Maps ======================= */
@@ -59,11 +59,16 @@ function initMap() {
   });
   geocoder = new google.maps.Geocoder();
 
+  // Create the (empty) corner list first. With `paths: []` the polygon has no path at all,
+  // so getPath() returns undefined and drawing breaks.
   farmPolygon = new google.maps.Polygon({
-    map, paths: [], editable: true,
+    map, editable: true,
     strokeColor: "#ffd400", strokeWeight: 3, fillColor: "#ffd400", fillOpacity: 0.25,
   });
+  farmPolygon.setPath(new google.maps.MVCArray());
   const path = farmPolygon.getPath();
+  // Uses the same corner list as the polygon, so the first two taps already show a line
+  cornerLine = new google.maps.Polyline({ map, path, clickable: false, strokeColor: "#ffd400", strokeWeight: 3 });
   ["insert_at", "set_at", "remove_at"].forEach((evt) => path.addListener(evt, onPolygonChanged));
 
   map.addListener("click", (e) => onMapClick(e.latLng));
@@ -115,7 +120,11 @@ function setMode(mode) {
   $("mode-draw").classList.toggle("active", mode === "draw");
   $("btn-undo").classList.toggle("hidden", mode !== "draw");
   clearSelection();
-  if (mode === "draw") setMapStatus("Tap each corner of your field. Drag the white dots to adjust. You need at least 3 corners.", "ok");
+  if (map) {
+    // Crosshair shows the map is ready for corner taps; stop double-taps from zooming while drawing
+    map.setOptions({ draggableCursor: mode === "draw" ? "crosshair" : null, disableDoubleClickZoom: mode === "draw" });
+  }
+  if (mode === "draw") setMapStatus("Drawing: click once on each corner of your field (don't drag). After 3 corners the shape appears. Drag the white dots to adjust.", "ok");
   else setMapStatus("Tap the map to pin your farm.", "ok");
 }
 
@@ -140,6 +149,7 @@ function setPoint(lat, lng, label) {
 
 function onPolygonChanged() {
   const pts = farmPolygon.getPath().getArray();
+  showFirstCorner(pts.length > 0 && pts.length < 3 ? pts[0] : null);
   if (pts.length < 3) {
     state.geometry = null;
     updateSelectionBar(pts.length ? `${pts.length} corner${pts.length > 1 ? "s" : ""}: tap at least ${3 - pts.length} more` : "Nothing selected yet");
@@ -152,6 +162,22 @@ function onPolygonChanged() {
   const c = boundsCenter(pts);
   state.label = `Farm field of ${ha.toFixed(2)} ha (${(ha * 2.471).toFixed(2)} acres) near ${c.lat.toFixed(4)}, ${c.lng.toFixed(4)}`;
   updateSelectionBar(`✏️ ${ha.toFixed(2)} ha (${(ha * 2.471).toFixed(2)} acres), ${pts.length} corners`);
+}
+
+// A yellow dot on the first corner, so the first tap visibly does something
+let firstCornerMarker = null;
+function showFirstCorner(latLng) {
+  if (!latLng) {
+    if (firstCornerMarker) firstCornerMarker.map = null;
+    return;
+  }
+  if (!firstCornerMarker) {
+    const dot = document.createElement("div");
+    dot.style.cssText = "width:14px;height:14px;border-radius:50%;background:#ffd400;border:2px solid #000;transform:translateY(7px);pointer-events:none";
+    firstCornerMarker = new google.maps.marker.AdvancedMarkerElement({ content: dot });
+  }
+  firstCornerMarker.position = latLng;
+  firstCornerMarker.map = map;
 }
 
 function clearSelection() {
