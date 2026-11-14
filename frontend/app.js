@@ -467,6 +467,7 @@ function showResult(r) {
   renderStats(r);
   renderChart(r);
   renderTable(r);
+  renderStatistics(r);
   const note = r.data.some((d) => d.complete === false) ? " Faded bars or hollow points mark periods with incomplete data." : "";
   const band = isFuture(r) ? " The line is the average of the climate models; the shaded band shows the range between them." : "";
   $("results-source").textContent = `Source: ${r.source}${band}${note}`;
@@ -498,7 +499,9 @@ function buildInsight(r) {
     const hiTxt = `${s.highest.date} (${fmt(s.highest.value)})`, loTxt = `${s.lowest.date} (${fmt(s.lowest.value)})`;
     parts.push(fut
       ? `The ${hi} year is expected to be ${hiTxt} and the ${lo} ${loTxt}.`
-      : `The ${hi} ${per} was ${hiTxt} and the ${lo} was ${loTxt}.`);
+      : r.frequency === "monthly"
+        ? `The single ${hi} month on record was ${hiTxt} and the ${lo} was ${loTxt}.`
+        : `The ${hi} ${per} was ${hiTxt} and the ${lo} was ${loTxt}.`);
   }
   if (s.trend_per_decade != null && r.frequency !== "monthly") parts.push(trendSentence(r, s.trend_per_decade, unit, k));
   if (r.frequency === "monthly") parts.push("Monthly values go up and down with the seasons; choose Yearly to see the long-term trend.");
@@ -571,7 +574,7 @@ function renderChart(r) {
       plugins: {
         legend: { display: false },
         tooltip: {
-          filter: (item) => !isFuture(r) || item.datasetIndex === 2,
+          filter: (item) => !item.dataset.isTrend && (!isFuture(r) || item.datasetIndex === 2),
           callbacks: {
             label: (ctx) => {
               const d = r.data[ctx.dataIndex];
@@ -629,6 +632,267 @@ function downloadCsv() {
   a.download = `${r.variable}_${fut ? r.scenario : r.frequency}.csv`;
   a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
+
+
+const BLANK = "___";
+const MONTH_SHORT = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+let seasonalChart;
+
+function esc(x) { return String(x).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
+function blank(x) { return x == null || x === "" || Number.isNaN(x); }
+function txt(x) { return blank(x) ? BLANK : esc(x); }
+function val(x, unit = "") { return blank(x) ? BLANK : `${fmtNum(x)}${unit ? (unit === "%" ? "%" : " " + esc(unit)) : ""}`; }
+function signed(x, unit = "") { return blank(x) ? BLANK : (x > 0 ? "+" : "") + val(x, unit); }
+function pval(p) { return blank(p) ? BLANK : p < 0.001 ? "&lt; 0.001" : Number(p).toFixed(3); }
+function yrs(y) { return Array.isArray(y) && y.length === 2 ? `${y[0]}–${y[1]}` : BLANK; }
+
+function varGroup(variable) {
+  if (variable === "precipitation") return "precip";
+  if (variable === "evapotranspiration") return "et";
+  if (variable === "soil_moisture") return "soil";
+  return "temp";
+}
+
+function shortUnit(r) {
+  const g = varGroup(r.variable);
+  return g === "temp" ? "°C" : g === "soil" ? "%" : "mm";
+}
+
+function trendUnit(r) {
+  return `${shortUnit(r)} per decade`;
+}
+
+function renderStatistics(r) {
+  loadDescriptiveStats(r);
+  loadSeasonalStats(r);
+  setupCompare(r);
+}
+
+function loadDescriptiveStats(result) {
+  const s = result.descriptive_stats || {};
+  renderMeanChange(result, s.change_in_mean);
+  renderTrendTest(result, s.mann_kendall_sens_slope, s.regression_line);
+  renderRegressionLine(chart, s.regression_line);
+}
+
+function renderMeanChange(result, m) {
+  const unit = result.unit;
+  const name = result.label.toLowerCase();
+  $("mean-change").innerHTML = `
+    <h4>Change in mean ${esc(name)}</h4>
+    <p>The average ${esc(name)} was <strong>${val(m?.period_a?.mean, unit)}</strong> in ${yrs(m?.period_a?.years)}
+    and <strong>${val(m?.period_b?.mean, unit)}</strong> in ${yrs(m?.period_b?.years)},
+    a change of <strong>${signed(m?.change, unit)}</strong> (${signed(m?.percent_change, "%")}).</p>`;
+}
+
+function renderTrendTest(result, t, reg) {
+  const fut = isFuture(result);
+  let verdict = `Trend: ${BLANK}`;
+  if (t && typeof t.significant === "boolean") {
+    const dir = t.direction || (t.sens_slope_per_decade > 0 ? "increasing" : "decreasing");
+    verdict = t.significant
+      ? `✅ ${fut ? "Climate models show" : "There is"} a <strong>statistically significant ${esc(dir)}</strong> trend.`
+      : `➖ <strong>No statistically significant trend.</strong> The ups and downs could be normal year-to-year variation.`;
+  }
+  const rows = [
+    ["Sen's slope", signed(t?.sens_slope_per_decade, trendUnit(result))],
+    ["Mann-Kendall p-value", pval(t?.p)],
+    ["Kendall's tau", val(t?.tau)],
+    ["Regression slope", signed(reg?.slope_per_decade, trendUnit(result))],
+    ["Regression R²", val(reg?.r2)],
+  ];
+  $("trend-test").innerHTML = `
+    <h4>Is the trend real? (Mann-Kendall test + Sen's slope)</h4>
+    <p class="verdict">${verdict}</p>
+    <div class="stats-table"><table><tbody>
+      ${rows.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join("")}
+    </tbody></table></div>
+    <p class="hint">A trend is statistically significant when p &lt; 0.05. The dashed line on the chart is the regression line.</p>`;
+}
+
+function renderRegressionLine(chartObj, reg) {
+  if (!chartObj || !reg || !Array.isArray(reg.line) || !reg.line.length) return;
+  const labels = chartObj.data.labels;
+  const len = String(labels[0]).length;
+  const byDate = new Map(reg.line.map((p) => [String(p.date).slice(0, len), p.value]));
+  chartObj.data.datasets.push({
+    type: "line",
+    label: "Regression line",
+    data: labels.map((l) => (byDate.has(l) ? byDate.get(l) : null)),
+    borderColor: "#52514e",
+    borderDash: [6, 4],
+    borderWidth: 2,
+    pointRadius: 0,
+    pointHoverRadius: 0,
+    fill: false,
+    spanGaps: true,
+    isTrend: true,
+    order: -1,
+  });
+  chartObj.update();
+}
+
+function loadSeasonalStats(result) {
+  const section = $("seasonal-stats");
+  if (isFuture(result)) {
+    section.classList.add("hidden");
+    return;
+  }
+  section.classList.remove("hidden");
+  const s = result.seasonal_stats || {};
+  const g = varGroup(result.variable);
+  const unit = shortUnit(result);
+  renderSeasonalChart(result, s.monthly_means);
+  renderWetDryMonths(g === "precip" ? s.wettest_driest_months : null, unit, g === "precip");
+  renderHotCoolMonths(g === "temp" ? s.hottest_coolest_months : null, unit, g === "temp");
+  renderExtremes(g, g === "soil" ? s.soil_moisture_extremes : g === "et" ? s.evapotranspiration_extremes : null, unit);
+  renderAnomalies(result, s.anomaly_analysis);
+}
+
+function renderSeasonalChart(result, means) {
+  if (seasonalChart) seasonalChart.destroy();
+  const byMonth = new Map((means || []).map((m) => [String(m.month).slice(0, 3), m.mean]));
+  const g = varGroup(result.variable);
+  const bars = g === "precip" || g === "et";
+  seasonalChart = new Chart($("seasonal-chart"), {
+    type: bars ? "bar" : "line",
+    data: {
+      labels: MONTH_SHORT,
+      datasets: [{
+        label: `Average ${result.label.toLowerCase()}`,
+        data: MONTH_SHORT.map((m) => (byMonth.has(m) ? byMonth.get(m) : null)),
+        borderColor: SERIES_COLOR,
+        backgroundColor: SERIES_COLOR,
+        borderWidth: 2,
+        borderRadius: 4,
+        pointRadius: 4,
+        tension: 0.3,
+      }],
+    },
+    options: {
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        title: { display: true, text: "Average for each calendar month (all years)", color: "#52514e", font: { weight: "normal" } },
+        tooltip: { callbacks: { label: (ctx) => ` ${fmtNum(ctx.parsed.y)} ${shortUnit(result)}` } },
+      },
+      scales: {
+        x: { grid: { display: false }, ticks: { color: "#52514e" } },
+        y: { beginAtZero: bars, grid: { color: "#ecebe6" }, border: { display: false }, ticks: { color: "#52514e" },
+             title: { display: true, text: shortUnit(result) === "mm" ? "mm per month" : shortUnit(result), color: "#52514e" } },
+      },
+    },
+  });
+}
+
+function renderWetDryMonths(stats, unit, show) {
+  $("wet-dry-months").innerHTML = !show ? "" : `
+    <h4>Wettest and driest months</h4>
+    <p>Across all years, <strong>${txt(stats?.wettest?.month)}</strong> is usually the wettest month
+    (average ${val(stats?.wettest?.mean, unit)}) and <strong>${txt(stats?.driest?.month)}</strong> is usually the driest
+    (average ${val(stats?.driest?.mean, unit)}).</p>`;
+}
+
+function renderHotCoolMonths(stats, unit, show) {
+  $("hot-cool-months").innerHTML = !show ? "" : `
+    <h4>Hottest and coolest months</h4>
+    <p>Across all years, <strong>${txt(stats?.hottest?.month)}</strong> is usually the hottest month
+    (average ${val(stats?.hottest?.mean, unit)}) and <strong>${txt(stats?.coolest?.month)}</strong> is usually the coolest
+    (average ${val(stats?.coolest?.mean, unit)}).</p>`;
+}
+
+function renderExtremes(group, stats, unit) {
+  if (group !== "soil" && group !== "et") {
+    $("extremes").innerHTML = "";
+    return;
+  }
+  const title = group === "soil" ? "Soil moisture extremes" : "Evapotranspiration extremes";
+  const hi = group === "soil" ? "wettest" : "highest";
+  const lo = group === "soil" ? "driest" : "lowest";
+  const what = group === "soil" ? "The soil is usually" : "Evapotranspiration is usually";
+  $("extremes").innerHTML = `
+    <h4>${title}</h4>
+    <p>Across all years, ${what} ${hi} in <strong>${txt(stats?.highest?.month)}</strong>
+    (average ${val(stats?.highest?.mean, unit)}) and ${lo} in <strong>${txt(stats?.lowest?.month)}</strong>
+    (average ${val(stats?.lowest?.mean, unit)}).</p>`;
+}
+
+function renderAnomalies(result, a) {
+  const per = periodWord(result);
+  const basis = result.frequency === "monthly" ? "the normal for that calendar month" : "the long-term average";
+  const rows = Array.isArray(a?.unusual) && a.unusual.length ? a.unusual : [{}, {}, {}];
+  $("anomalies").innerHTML = `
+    <h4>Anomaly analysis</h4>
+    <p><strong>${txt(a?.count_beyond_2sd)}</strong> ${per}s were unusually high or low
+    (more than 2 standard deviations from ${basis}).</p>
+    <div class="stats-table"><table>
+      <thead><tr><th>${capitalize(per)}</th><th>Value</th><th>Difference from normal</th><th>z-score</th></tr></thead>
+      <tbody>${rows.map((x) => `<tr><td>${txt(x.date)}</td><td>${val(x.value, result.unit)}</td><td>${signed(x.anomaly, result.unit)}</td><td>${signed(x.z)}</td></tr>`).join("")}</tbody>
+    </table></div>`;
+}
+
+function setupCompare(result) {
+  const section = $("compare-periods");
+  const years = [...new Set(result.data.filter((d) => d.complete !== false).map((d) => +String(d.date).slice(0, 4)))].sort((x, y) => x - y);
+  if (years.length < 2) {
+    section.classList.add("hidden");
+    return;
+  }
+  section.classList.remove("hidden");
+  const mid = Math.floor(years.length / 2);
+  const defaults = { "period-a-start": years[0], "period-a-end": years[mid - 1], "period-b-start": years[mid], "period-b-end": years[years.length - 1] };
+  for (const [id, def] of Object.entries(defaults)) {
+    const sel = $(id);
+    sel.innerHTML = "";
+    years.forEach((y) => sel.add(new Option(String(y), String(y))));
+    sel.value = String(def);
+  }
+  $("btn-compare").onclick = () => comparePeriods(result);
+  renderComparison(result, null);
+}
+
+function selectedPeriods() {
+  const a = [+$("period-a-start").value, +$("period-a-end").value].sort((x, y) => x - y);
+  const b = [+$("period-b-start").value, +$("period-b-end").value].sort((x, y) => x - y);
+  return { a, b };
+}
+
+async function comparePeriods(result) {
+  const { a, b } = selectedPeriods();
+  const source = Array.isArray(result.monthly) && result.monthly.length ? result.monthly : result.data;
+  const values = source.filter((d) => d.complete !== false && d.value != null).map((d) => ({ date: d.date, value: d.value }));
+  $("btn-compare").disabled = true;
+  try {
+    const res = await api("/api/stats/compare", {
+      method: "POST",
+      body: JSON.stringify({ variable: result.variable, values, period_a: a, period_b: b }),
+    });
+    renderComparison(result, res);
+  } catch (e) {
+    renderComparison(result, null, e.message);
+  } finally {
+    $("btn-compare").disabled = false;
+  }
+}
+
+function renderComparison(result, c, error) {
+  const { a, b } = selectedPeriods();
+  const usesMonthly = Array.isArray(result.monthly) && result.monthly.length;
+  const unit = usesMonthly && varGroup(result.variable) !== "temp" && varGroup(result.variable) !== "soil" ? "mm/month" : result.unit;
+  let verdict = BLANK;
+  if (c && typeof c.significant === "boolean") {
+    verdict = c.significant ? "✅ a statistically significant difference" : "➖ no statistically significant difference";
+  }
+  const overlap = !(a[1] < b[0] || b[1] < a[0]);
+  $("compare-result").innerHTML = `
+    <p class="insight">Period B (${yrs(b)}) averaged <strong>${val(c?.period_b?.mean, unit)}</strong>,
+    compared with <strong>${val(c?.period_a?.mean, unit)}</strong> in Period A (${yrs(a)}):
+    a difference of <strong>${signed(c?.difference, unit)}</strong> (${signed(c?.percent_change, "%")}).
+    Mann-Whitney U = ${val(c?.u)}, p = ${pval(c?.p)}, which means <strong>${verdict}</strong>.</p>
+    ${overlap ? `<p class="hint">The two periods overlap. Choose separate periods for a fair comparison.</p>` : ""}
+    ${error ? `<p class="form-error">${esc(error)}</p>` : ""}`;
 }
 
 /* ======================= Helpers ======================= */

@@ -12,11 +12,13 @@ import logging
 import os
 from pathlib import Path
 from typing import Literal
+import pandas as pd
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
+from comparison_stats import mann_whitney_u
 
 import future_service
 import giovanni_service
@@ -67,6 +69,11 @@ class FutureRequest(BaseModel):
     end_year: int
     geometry: Geometry
 
+class CompareRequest(BaseModel):
+    variable: str
+    values: list[dict]
+    period_a: tuple[int, int]
+    period_b: tuple[int, int]
 
 # ---------------- Helpers ----------------
 
@@ -167,7 +174,18 @@ def future(req: FutureRequest):
         log.exception("Future projection failed")
         raise HTTPException(502, str(ex))
 
-
+@app.post("/api/stats/compare")
+def compare(req: CompareRequest):
+    points = [(p["date"], p["value"]) for p in req.values if p.get("value") is not None]
+    if not points:
+        raise HTTPException(400, "No values to compare.")
+    dates = pd.to_datetime([d if len(str(d)) > 4 else f"{d}-01-01" for d, _ in points], errors="coerce")
+    series = pd.Series([v for _, v in points], index=dates).dropna()
+    try:
+        return mann_whitney_u(series, tuple(sorted(req.period_a)), tuple(sorted(req.period_b)))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    
 # Serve the frontend too when running locally (uvicorn main:app). On Firebase Hosting
 # the frontend is served by Firebase and only /api/** reaches this service.
 _frontend = Path(os.getenv("FRONTEND_DIR", Path(__file__).resolve().parent.parent / "frontend"))

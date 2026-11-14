@@ -151,6 +151,23 @@ table { border-collapse: collapse; width: 100%; font-size: .9rem; font-variant-n
 th, td { padding: 6px 10px; border-bottom: 1px solid var(--line); text-align: left; }
 th { position: sticky; top: 0; background: #f4f4f1; }
 
+
+.stats-section { margin-top: 26px; padding-top: 18px; border-top: 1px solid var(--line); }
+.stats-section h3 { margin: 0 0 10px; font-size: 1.1rem; }
+.stats-section h4 { margin: 0 0 6px; font-size: .95rem; }
+.verdict { font-size: 1.02rem; line-height: 1.5; margin: 12px 0 10px; }
+.chart-box.small { height: 260px; margin-bottom: 12px; }
+.stat-grid-2 { grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+.stat-grid-2 > div:empty { display: none; }
+.stat-grid-2 > div { border: 1px solid var(--line); border-radius: 8px; padding: 12px; background: var(--surface); font-size: .92rem; line-height: 1.45; }
+.stats-table { margin-top: 8px; border: 1px solid var(--line); border-radius: 6px; overflow: auto; }
+.stats-table td:first-child { color: var(--ink-2); }
+.compare-row { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; margin-top: 10px; }
+.compare-row fieldset { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; display: flex; gap: 6px; align-items: center; margin: 0; }
+.compare-row legend { font-weight: 600; font-size: .85rem; padding: 0 4px; }
+.compare-row select { padding: 7px; }
+#compare-result { margin-top: 12px; }
+
 /* ---------- Modals ---------- */
 .modal { position: fixed; inset: 0; background: rgba(0,0,0,.5); display: flex; align-items: center; justify-content: center; z-index: 1000; padding: 16px; }
 .modal-content { background: #fff; padding: 24px; border-radius: 10px; max-width: 540px; max-height: 90vh; overflow: auto; line-height: 1.5; }
