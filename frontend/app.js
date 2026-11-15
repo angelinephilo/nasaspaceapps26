@@ -833,17 +833,22 @@ function renderAnomalies(result, a) {
     </table></div>`;
 }
 
+function compareSource(result) {
+  if (Array.isArray(result.monthly) && result.monthly.length) return result.monthly;
+  if (result.frequency === "monthly" || result.frequency === "daily") return result.data;
+  return [];
+}
+
 function setupCompare(result) {
   const section = $("compare-periods");
-  const years = [...new Set(result.data.filter((d) => d.complete !== false).map((d) => +String(d.date).slice(0, 4)))].sort((x, y) => x - y);
-  if (years.length < 2) {
+  const source = compareSource(result).filter((d) => d.complete !== false && d.value != null);
+  const years = [...new Set(source.map((d) => +String(d.date).slice(0, 4)))].sort((x, y) => x - y);
+  if (isFuture(result) || years.length < 2) {
     section.classList.add("hidden");
     return;
   }
   section.classList.remove("hidden");
-  const mid = Math.floor(years.length / 2);
-  const defaults = { "period-a-start": years[0], "period-a-end": years[mid - 1], "period-b-start": years[mid], "period-b-end": years[years.length - 1] };
-  for (const [id, def] of Object.entries(defaults)) {
+  for (const [id, def] of [["year-a", years[0]], ["year-b", years[years.length - 1]]]) {
     const sel = $(id);
     sel.innerHTML = "";
     years.forEach((y) => sel.add(new Option(String(y), String(y))));
@@ -853,21 +858,25 @@ function setupCompare(result) {
   renderComparison(result, null);
 }
 
-function selectedPeriods() {
-  const a = [+$("period-a-start").value, +$("period-a-end").value].sort((x, y) => x - y);
-  const b = [+$("period-b-start").value, +$("period-b-end").value].sort((x, y) => x - y);
-  return { a, b };
+function selectedYears() {
+  return { a: +$("year-a").value, b: +$("year-b").value };
 }
 
 async function comparePeriods(result) {
-  const { a, b } = selectedPeriods();
-  const source = Array.isArray(result.monthly) && result.monthly.length ? result.monthly : result.data;
-  const values = source.filter((d) => d.complete !== false && d.value != null).map((d) => ({ date: d.date, value: d.value }));
+  const { a, b } = selectedYears();
+  if (a === b) {
+    renderComparison(result, null, "Choose two different years.");
+    return;
+  }
+  const values = compareSource(result)
+    .filter((d) => d.complete !== false && d.value != null)
+    .filter((d) => [a, b].includes(+String(d.date).slice(0, 4)))
+    .map((d) => ({ date: d.date, value: d.value }));
   $("btn-compare").disabled = true;
   try {
     const res = await api("/api/stats/compare", {
       method: "POST",
-      body: JSON.stringify({ variable: result.variable, values, period_a: a, period_b: b }),
+      body: JSON.stringify({ variable: result.variable, values, period_a: [a, a], period_b: [b, b] }),
     });
     renderComparison(result, res);
   } catch (e) {
@@ -878,20 +887,20 @@ async function comparePeriods(result) {
 }
 
 function renderComparison(result, c, error) {
-  const { a, b } = selectedPeriods();
-  const usesMonthly = Array.isArray(result.monthly) && result.monthly.length;
-  const unit = usesMonthly && varGroup(result.variable) !== "temp" && varGroup(result.variable) !== "soil" ? "mm/month" : result.unit;
+  const { a, b } = selectedYears();
+  const g = varGroup(result.variable);
+  const daily = result.frequency === "daily" && !(Array.isArray(result.monthly) && result.monthly.length);
+  const unit = g === "temp" ? "°C" : g === "soil" ? "%" : daily ? "mm/day" : "mm/month";
+  const per = daily ? "day" : "month";
   let verdict = BLANK;
   if (c && typeof c.significant === "boolean") {
     verdict = c.significant ? "✅ a statistically significant difference" : "➖ no statistically significant difference";
   }
-  const overlap = !(a[1] < b[0] || b[1] < a[0]);
   $("compare-result").innerHTML = `
-    <p class="insight">Period B (${yrs(b)}) averaged <strong>${val(c?.period_b?.mean, unit)}</strong>,
-    compared with <strong>${val(c?.period_a?.mean, unit)}</strong> in Period A (${yrs(a)}):
+    <p class="insight">In <strong>${b}</strong>, ${per}ly values averaged <strong>${val(c?.period_b?.mean, unit)}</strong>,
+    compared with <strong>${val(c?.period_a?.mean, unit)}</strong> in <strong>${a}</strong>:
     a difference of <strong>${signed(c?.difference, unit)}</strong> (${signed(c?.percent_change, "%")}).
     Mann-Whitney U = ${val(c?.u)}, p = ${pval(c?.p)}, which means <strong>${verdict}</strong>.</p>
-    ${overlap ? `<p class="hint">The two periods overlap. Choose separate periods for a fair comparison.</p>` : ""}
     ${error ? `<p class="form-error">${esc(error)}</p>` : ""}`;
 }
 

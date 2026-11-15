@@ -15,7 +15,7 @@
       <button id="btn-back" class="nav-btn hidden" type="button">← Back</button>
       <button id="btn-home" class="nav-btn" type="button">Home</button>
     </div>
-    <div class="brand">🌾 AgriClimate Explorer</div>
+    <div class="brand">Vanni the Farmer! 👩🏾‍🌾</div>
     <div class="nav-right">
       <button class="nav-btn" type="button" data-modal="how-modal">How it Works</button>
       <button class="nav-btn" type="button" data-modal="about-modal">About</button>
@@ -197,21 +197,11 @@
         </section>
 
         <section id="compare-periods" class="stats-section">
-          <h3>Compare two periods</h3>
-          <p class="hint">Are values in Period B generally higher or lower than in Period A? (Mann-Whitney U test)</p>
+          <h3>Compare two years</h3>
+          <p class="hint">Are monthly values in Year B generally higher or lower than in Year A? (Mann-Whitney U test)</p>
           <div class="compare-row">
-            <fieldset>
-              <legend>Period A</legend>
-              <select id="period-a-start" aria-label="Period A start year"></select>
-              <span>to</span>
-              <select id="period-a-end" aria-label="Period A end year"></select>
-            </fieldset>
-            <fieldset>
-              <legend>Period B</legend>
-              <select id="period-b-start" aria-label="Period B start year"></select>
-              <span>to</span>
-              <select id="period-b-end" aria-label="Period B end year"></select>
-            </fieldset>
+            <label>Year A <select id="year-a" aria-label="Year A"></select></label>
+            <label>Year B <select id="year-b" aria-label="Year B"></select></label>
             <button id="btn-compare" class="primary-btn" type="button">Compare</button>
           </div>
           <div id="compare-result"></div>
