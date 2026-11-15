@@ -193,34 +193,99 @@ function updateSelectionBar(text) {
 }
 
 function reverseGeocode(lat, lng) {
-  if (!geocoder) return;
-  geocoder.geocode({ location: { lat, lng } }).then(({ results }) => {
-    const r = results.find((x) => x.types.includes("locality")) || results.find((x) => x.types.includes("administrative_area_level_2")) || results[0];
+  const apply = (name) => {
     const g = state.geometry;
     const same = g && g.type === "Point" && g.coordinates[0] === round(lng, 6) && g.coordinates[1] === round(lat, 6);
-    if (r && same) {
-      state.label = `${r.formatted_address} (${lat.toFixed(4)}, ${lng.toFixed(4)})`;
+    if (name && same) {
+      state.label = `${name} (${lat.toFixed(4)}, ${lng.toFixed(4)})`;
       updateSelectionBar(`📍 ${state.label}`);
     }
-  }).catch(() => { /* keep coordinates as the label */ });
+  };
+  const osm = () => fetch(`${NOMINATIM}/reverse?format=jsonv2&zoom=12&lat=${lat}&lon=${lng}`, { headers: { "Accept-Language": navigator.language || "en" } })
+    .then((r) => r.json()).then((x) => apply(x && x.display_name ? shortPlaceName(x.display_name) : null)).catch(() => {});
+  if (!geocoder) return osm();
+  geocoder.geocode({ location: { lat, lng } }).then(({ results }) => {
+    const r = results.find((x) => x.types.includes("locality")) || results.find((x) => x.types.includes("administrative_area_level_2")) || results[0];
+    if (r) apply(r.formatted_address); else osm();
+  }).catch(osm);
 }
 
-function searchLocation(query) {
+const NOMINATIM = "https://nominatim.openstreetmap.org";
+
+async function googleSearch(query) {
+  if (!geocoder) return { place: null, error: "map not loaded" };
+  try {
+    const { results } = await geocoder.geocode({ address: query });
+    if (!results.length) return { place: null, error: null };
+    const r = results[0];
+    return {
+      place: { name: r.formatted_address, lat: r.geometry.location.lat(), lng: r.geometry.location.lng(), viewport: r.geometry.viewport },
+      error: null,
+    };
+  } catch (e) {
+    const code = e && (e.code || e.message) ? String(e.code || e.message) : "unknown error";
+    return { place: null, error: /ZERO_RESULTS/.test(code) ? null : code };
+  }
+}
+
+async function osmSearch(query) {
+  try {
+    const res = await fetch(`${NOMINATIM}/search?format=jsonv2&limit=1&q=${encodeURIComponent(query)}`, {
+      headers: { "Accept-Language": navigator.language || "en" },
+    });
+    const found = await res.json();
+    if (!Array.isArray(found) || !found.length) return null;
+    const x = found[0];
+    const [s, n, w, e] = (x.boundingbox || []).map(Number);
+    return { name: x.display_name, lat: +x.lat, lng: +x.lon, box: x.boundingbox ? { s, n, w, e } : null };
+  } catch {
+    return null;
+  }
+}
+
+function shortPlaceName(name) {
+  return String(name).split(",").slice(0, 2).join(",").trim();
+}
+
+async function searchLocation(query) {
   query = query.trim();
-  if (!query) return;
+  if (!query || !map) return;
   const m = query.match(/^\s*(-?\d+(?:\.\d+)?)\s*[,\s]\s*(-?\d+(?:\.\d+)?)\s*$/);
   if (m) {
     const lat = parseFloat(m[1]), lng = parseFloat(m[2]);
     if (Math.abs(lat) > 90 || Math.abs(lng) > 180) return setMapStatus("Coordinates should be latitude, longitude (e.g. 1.3521, 103.8198).", "warn");
-    map.setCenter({ lat, lng }); map.setZoom(15);
+    map.setCenter({ lat, lng });
+    map.setZoom(15);
     return setPoint(lat, lng);
   }
-  if (!geocoder) return;
-  geocoder.geocode({ address: query }).then(({ results }) => {
-    const r = results[0];
-    if (r.geometry.viewport) map.fitBounds(r.geometry.viewport); else map.setCenter(r.geometry.location);
-    setMapStatus(`Found ${r.formatted_address}. Tap your farm to pin it, or draw its boundary.`, "ok");
-  }).catch(() => setMapStatus("Place not found. Try a town name, or type coordinates like 1.3521, 103.8198.", "warn"));
+  setMapStatus(`Searching for “${query}”…`);
+  const viaGoogle = await googleSearch(query);
+  let place = viaGoogle.place;
+  if (!place) place = await osmSearch(query);
+  if (!place) {
+    if (viaGoogle.error) console.warn("Google geocoding failed:", viaGoogle.error);
+    return setMapStatus(
+      viaGoogle.error && /DENIED|BILLING|API_KEY|not authorized|not activated/i.test(viaGoogle.error)
+        ? `Search is limited: Google refused the request (${viaGoogle.error}) and OpenStreetMap found nothing. Try a nearby town name, or type coordinates like 1.3521, 103.8198.`
+        : "Place not found. Try a nearby town or village name, or type coordinates like 1.3521, 103.8198.",
+      "warn");
+  }
+  if (place.viewport) {
+    map.fitBounds(place.viewport);
+  } else if (place.box) {
+    map.fitBounds(new google.maps.LatLngBounds({ lat: place.box.s, lng: place.box.w }, { lat: place.box.n, lng: place.box.e }));
+  } else {
+    map.setCenter({ lat: place.lat, lng: place.lng });
+    map.setZoom(14);
+  }
+  if (map.getZoom && map.getZoom() > 16) map.setZoom(16);
+  const label = shortPlaceName(place.name);
+  if (state.mode === "pin") {
+    setPoint(place.lat, place.lng, `${label} (${place.lat.toFixed(4)}, ${place.lng.toFixed(4)})`);
+    setMapStatus(`Found ${label}. A pin was placed at its centre: tap your exact farm to move it, or choose “Draw farm boundary”.`, "ok");
+  } else {
+    setMapStatus(`Found ${label}. Tap the corners of your field to outline it.`, "ok");
+  }
 }
 
 /* ======================= Navigation ======================= */
@@ -1173,7 +1238,7 @@ document.addEventListener("DOMContentLoaded", () => {
   document.querySelectorAll(".modal").forEach((m) => m.addEventListener("click", (e) => { if (e.target === m) closeModals(); }));
   document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeModals(); });
 
-  $("search-form").onsubmit = (e) => { e.preventDefault(); if (map) searchLocation($("location-search").value); };
+  $("search-form").onsubmit = (e) => { e.preventDefault(); searchLocation($("location-search").value); };
   $("mode-pin").onclick = () => setMode("pin");
   $("mode-draw").onclick = () => setMode("draw");
   $("btn-locate").onclick = locateUser;
