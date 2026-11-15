@@ -1,0 +1,114 @@
+"""Climate API for the map frontend.
+
+Run (from the repo root):
+    uvicorn api.main:app --reload
+Docs / manual testing:  http://localhost:8000/docs
+
+Endpoints
+    GET  /meta                    available scenarios, periods and variables
+    GET  /point?lat=..&lon=..     values at one clicked location
+    POST /area                    area average inside a drawn polygon
+                                  body: {"geometry": <GeoJSON Polygon>}
+"""
+import os
+from pathlib import Path
+
+import numpy as np
+import shapely
+import xarray as xr
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from shapely.geometry import shape
+
+STATS_DIR = Path(os.environ.get("CLIMATE_STATS", "data/stats"))
+LAT, LON = (-12, 38), (60, 145)   # must match pipeline/config.py
+
+SCALARS = ["pr_annual", "tasmin_annual", "tasmax_annual", "rx1day", "hotdays35"]
+MONTHLY = ["pr_monthly", "tasmin_monthly", "tasmax_monthly"]
+
+app = FastAPI(title="Climate projections (GFDL-ESM4, NEX-GDDP-CMIP6)")
+app.add_middleware(CORSMiddleware, allow_origins=["*"],
+                   allow_methods=["GET", "POST"], allow_headers=["*"])
+
+# Load once at startup. Delta files are for the map overlay, not this API.
+DS = {p.stem: xr.open_dataset(p)[SCALARS + MONTHLY].load()
+      for p in sorted(STATS_DIR.glob("*.nc")) if not p.stem.startswith("delta_")}
+if "baseline" not in DS:
+    raise RuntimeError(f"baseline.nc not found in {STATS_DIR.resolve()}")
+
+
+def _projection_keys():
+    return [k for k in DS if k != "baseline"]
+
+
+def point_summary(ds, lat, lon):
+    p = ds.sel(lat=lat, lon=lon, method="nearest")
+    if np.isnan(float(p["tasmax_annual"])):
+        return None                       # ocean / masked cell
+    out = {v: round(float(p[v]), 1) for v in SCALARS}
+    out.update({v: [round(float(x), 1) for x in p[v].values] for v in MONTHLY})
+    return out
+
+
+def area_summary(ds, geom):
+    lon2d, lat2d = np.meshgrid(ds.lon.values, ds.lat.values)
+    inside = xr.DataArray(shapely.contains_xy(geom, lon2d, lat2d),
+                          coords={"lat": ds.lat, "lon": ds.lon}, dims=("lat", "lon"))
+    sub = ds.where(inside)
+    n = int(sub["tasmax_annual"].notnull().sum())
+    if n == 0:
+        return None                       # no land cell centres inside the shape
+    # weight by cos(latitude): cells nearer the poles cover less area
+    m = sub.weighted(np.cos(np.deg2rad(ds.lat))).mean(["lat", "lon"])
+    out = {v: round(float(m[v]), 1) for v in SCALARS}
+    out.update({v: [round(float(x), 1) for x in m[v].values] for v in MONTHLY})
+    out["n_cells"] = n
+    return out
+
+
+@app.get("/meta")
+def meta():
+    return {"region": {"lat": LAT, "lon": LON},
+            "projections": _projection_keys(),
+            "scalars": SCALARS, "monthly": MONTHLY}
+
+
+@app.get("/point")
+def point(lat: float, lon: float):
+    if not (LAT[0] <= lat <= LAT[1] and LON[0] <= lon <= LON[1]):
+        raise HTTPException(400, "Outside the supported region")
+    base = point_summary(DS["baseline"], lat, lon)
+    if base is None:
+        raise HTTPException(404, "No data for this location (ocean)")
+    return {"lat": lat, "lon": lon, "baseline": base,
+            "projections": {k: point_summary(DS[k], lat, lon) for k in _projection_keys()}}
+
+
+class AreaRequest(BaseModel):
+    geometry: dict          # GeoJSON Polygon from the map's draw tool
+
+
+@app.post("/area")
+def area(req: AreaRequest):
+    try:
+        geom = shape(req.geometry)
+    except Exception:
+        raise HTTPException(400, "Could not read geometry (expected a GeoJSON Polygon)")
+    if not geom.is_valid:
+        raise HTTPException(400, "Invalid shape")
+    minx, miny, maxx, maxy = geom.bounds
+    if minx < LON[0] or maxx > LON[1] or miny < LAT[0] or maxy > LAT[1]:
+        raise HTTPException(400, "Shape extends outside the supported region")
+
+    base = area_summary(DS["baseline"], geom)
+    if base is None:
+        # shape is smaller than one grid cell: fall back to its centre point
+        c = geom.centroid
+        base = point_summary(DS["baseline"], c.y, c.x)
+        if base is None:
+            raise HTTPException(404, "No data here (ocean)")
+        return {"mode": "centroid", "baseline": base,
+                "projections": {k: point_summary(DS[k], c.y, c.x) for k in _projection_keys()}}
+    return {"mode": "area", "baseline": base,
+            "projections": {k: area_summary(DS[k], geom) for k in _projection_keys()}}
