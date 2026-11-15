@@ -1,4 +1,4 @@
-"""AgriClimate Explorer API.
+"""
 
 POST /api/historical            submit a Giovanni (Harmony) area-average job -> {job}
 GET  /api/historical/{job}      poll; returns the chart data once finished
@@ -13,12 +13,12 @@ import os
 from pathlib import Path
 from typing import Literal
 import pandas as pd
+import re
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
-from comparison_stats import mann_whitney_u
 
 import future_service
 import giovanni_service
@@ -64,16 +64,9 @@ class HistoricalRequest(BaseModel):
 
 class FutureRequest(BaseModel):
     variable: str
-    ssp: str
     start_year: int
     end_year: int
     geometry: Geometry
-
-class CompareRequest(BaseModel):
-    variable: str
-    values: list[dict]
-    period_a: tuple[int, int]
-    period_b: tuple[int, int]
 
 # ---------------- Helpers ----------------
 
@@ -103,6 +96,12 @@ def decode_job(token: str) -> tuple[str, str, str]:
 
 
 # ---------------- Endpoints ----------------
+
+_SECRET_RE = re.compile(r"(Bearer\s+|token=|password=)[^\s'\"&]+", re.IGNORECASE)
+
+
+def safe_error(e: Exception) -> str:
+    return _SECRET_RE.sub(r"\1[hidden]", str(e))[:300]
 
 @app.get("/api/health")
 def health():
@@ -160,8 +159,6 @@ def poll_historical(job: str):
 def future(req: FutureRequest):
     if req.variable not in FUTURE_VARIABLES:
         raise HTTPException(400, "Unknown variable.")
-    if req.ssp not in SSP_SCENARIOS:
-        raise HTTPException(400, "Unknown scenario.")
     s, e = max(req.start_year, FUTURE_FIRST_YEAR), min(req.end_year, FUTURE_LAST_YEAR)
     if e < s:
         raise HTTPException(400, f"Choose years between {FUTURE_FIRST_YEAR} and {FUTURE_LAST_YEAR}.")
@@ -169,22 +166,13 @@ def future(req: FutureRequest):
         raise HTTPException(400, "Choose a period of 50 years or less.")
     lat, lng = bbox_center(bbox_from_geometry(req.geometry.model_dump()))
     try:
-        return future_service.projection(req.variable, req.ssp, s, e, lat, lng)
+        return future_service.projection_pair(req.variable, s, e, lat, lng)
+    except ValueError as ex:
+        raise HTTPException(400, safe_error(ex))
     except Exception as ex:
         log.exception("Future projection failed")
-        raise HTTPException(502, str(ex))
+        raise HTTPException(502, safe_error(ex))
 
-@app.post("/api/stats/compare")
-def compare(req: CompareRequest):
-    points = [(p["date"], p["value"]) for p in req.values if p.get("value") is not None]
-    if not points:
-        raise HTTPException(400, "No values to compare.")
-    dates = pd.to_datetime([d if len(str(d)) > 4 else f"{d}-01-01" for d, _ in points], errors="coerce")
-    series = pd.Series([v for _, v in points], index=dates).dropna()
-    try:
-        return mann_whitney_u(series, tuple(sorted(req.period_a)), tuple(sorted(req.period_b)))
-    except ValueError as e:
-        raise HTTPException(400, str(e))
     
 # Serve the frontend too when running locally (uvicorn main:app). On Firebase Hosting
 # the frontend is served by Firebase and only /api/** reaches this service.

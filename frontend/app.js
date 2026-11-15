@@ -389,7 +389,7 @@ async function runHistorical(params) {
 
 async function runFuture(params) {
   const runId = startResults(params, "future");
-  setProgress("Collecting climate projections from three NASA climate models. This can take a minute or two. Please keep this page open…", null);
+  setProgress("Collecting NASA climate projections. This can take up to a minute or two. Please keep this page open…", null);
   try {
     // If the connection drops, asking again is cheap when the server already finished (it keeps results).
     const r = await withRetry(
@@ -469,7 +469,7 @@ function showResult(r) {
   renderTable(r);
   renderStatistics(r);
   const note = r.data.some((d) => d.complete === false) ? " Faded bars or hollow points mark periods with incomplete data." : "";
-  const band = isFuture(r) ? " The line is the average of the climate models; the shaded band shows the range between them." : "";
+  const band = isFuture(r) && (r.models || []).length > 1 ? " The line is the average of the climate models; the shaded band shows the range between them." : "";
   $("results-source").textContent = `Source: ${r.source}${band}${note}`;
 }
 
@@ -579,7 +579,7 @@ function renderChart(r) {
             label: (ctx) => {
               const d = r.data[ctx.dataIndex];
               let s = ` ${fmtNum(ctx.parsed.y)} ${r.unit}`;
-              if (isFuture(r)) s += `  (models: ${fmtNum(d.low)} to ${fmtNum(d.high)})`;
+              if (isFuture(r) && d.low != null && d.high != null) s += `  (models: ${fmtNum(d.low)} to ${fmtNum(d.high)})`;
               if (d.complete === false) s += "  (incomplete data)";
               return s;
             },
@@ -607,14 +607,15 @@ function renderChart(r) {
 function renderTable(r) {
   const t = $("results-table");
   const fut = isFuture(r);
-  const head = fut ? ["Year", `Average (${r.unit})`, "Lowest model", "Highest model"] : ["Date", `${r.label} (${r.unit})`];
+  const band = fut && r.data.some((d) => d.low != null);
+  const head = band ? ["Year", `Average (${r.unit})`, "Lowest model", "Highest model"] : [fut ? "Year" : "Date", `${r.label} (${r.unit})`];
   t.innerHTML = "";
   const thead = t.createTHead().insertRow();
   head.forEach((h) => { const th = document.createElement("th"); th.textContent = h; thead.appendChild(th); });
   const tb = t.createTBody();
   for (const d of r.data) {
     const row = tb.insertRow();
-    const cells = fut ? [d.date, fmtNum(d.value), fmtNum(d.low), fmtNum(d.high)] : [d.date + (d.complete === false ? " (incomplete)" : ""), fmtNum(d.value)];
+    const cells = band ? [d.date, fmtNum(d.value), fmtNum(d.low), fmtNum(d.high)] : [d.date + (d.complete === false ? " (incomplete)" : ""), fmtNum(d.value)];
     cells.forEach((c) => (row.insertCell().textContent = c));
   }
 }
@@ -736,7 +737,7 @@ function renderRegressionLine(chartObj, reg) {
 
 function loadSeasonalStats(result) {
   const section = $("seasonal-stats");
-  if (isFuture(result)) {
+  if (isFuture(result) && !(Array.isArray(result.monthly) && result.monthly.length)) {
     section.classList.add("hidden");
     return;
   }
@@ -843,7 +844,7 @@ function setupCompare(result) {
   const section = $("compare-periods");
   const source = compareSource(result).filter((d) => d.complete !== false && d.value != null);
   const years = [...new Set(source.map((d) => +String(d.date).slice(0, 4)))].sort((x, y) => x - y);
-  if (isFuture(result) || years.length < 2) {
+  if (years.length < 2) {
     section.classList.add("hidden");
     return;
   }

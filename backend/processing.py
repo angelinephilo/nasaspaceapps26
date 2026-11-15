@@ -259,7 +259,7 @@ def summarize(df: pd.DataFrame, frequency: str) -> dict:
 def _r(x, nd=2):
     if x is None or (isinstance(x, float) and math.isnan(x)):
         return None
-    return round(float(x), nd)
+    return round(float(x), nd) + 0.0
 
 
 def to_points(df: pd.DataFrame, frequency: str) -> list[dict]:

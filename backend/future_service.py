@@ -20,6 +20,10 @@ import requests
 
 from datasets import FUTURE_GRID_DEG, FUTURE_MODELS, FUTURE_VARIABLES, SSP_SCENARIOS
 from processing import parse_ncss_point_csv, summarize, to_base_units, unit_label
+from descriptive_stats import descriptive_statistics
+from seasonal_stats import seasonal_statistics
+import local_cmip6
+from comparison_stats import compare_scenarios
 
 THREDDS = "https://ds.nccs.nasa.gov/thredds"
 DATA_ROOT = "AMES/NEX/GDDP-CMIP6"
@@ -101,6 +105,12 @@ def projection(variable: str, ssp: str, start_year: int, end_year: int, lat: flo
     years = list(range(start_year, end_year + 1))
     var, kind = meta["cmip_var"], meta["kind"]
 
+    if local_cmip6.has_years(ssp, years) and local_cmip6.covers(lat, lng):
+        result = _local_projection(variable, ssp, years, lat, lng)
+        with _cache_lock:
+            _cache[key] = result
+        return result
+
     errors = []
     # Read each model's file list once, then fetch one year per task in parallel
     with ThreadPoolExecutor(max_workers=12) as pool:
@@ -149,6 +159,8 @@ def projection(variable: str, ssp: str, start_year: int, end_year: int, lat: flo
             for y, row in table.iterrows()
         ],
         "summary": summarize(df, "yearly"),
+        "descriptive_stats": descriptive_statistics(variable, df["value"], "yearly"),
+        "seasonal_stats": seasonal_statistics(variable, df["value"], None, "yearly"),
         "warnings": errors[:3],
     }
     with _cache_lock:
@@ -158,5 +170,60 @@ def projection(variable: str, ssp: str, start_year: int, end_year: int, lat: flo
     return result
 
 
+def _local_projection(variable: str, ssp: str, years: list[int], lat: float, lng: float) -> dict:
+    meta = FUTURE_VARIABLES[variable]
+    kind = meta["kind"]
+    monthly = local_cmip6.monthly_point(ssp, variable, lat, lng, years)
+    yearly = local_cmip6.yearly_from_monthly(monthly, variable)
+    if yearly.empty:
+        raise RuntimeError("No local climate data for this location and period.")
+    df = pd.DataFrame({"value": yearly, "complete": True})
+    return {
+        "status": "successful",
+        "variable": variable,
+        "label": meta["label"],
+        "frequency": "yearly",
+        "unit": unit_label(kind, "yearly"),
+        "scenario": ssp,
+        "scenario_label": SSP_SCENARIOS[ssp],
+        "models": [local_cmip6.LOCAL_MODEL],
+        "source": f"NASA NEX-GDDP-CMIP6 downscaled climate projections (about 25 km), {local_cmip6.LOCAL_MODEL} model.",
+        "data": [{"date": d.strftime("%Y"), "value": _r(v), "low": None, "high": None} for d, v in yearly.items()],
+        "monthly": [{"date": d.strftime("%Y-%m"), "value": _r(v), "complete": True} for d, v in monthly.items()],
+        "summary": summarize(df, "yearly"),
+        "descriptive_stats": descriptive_statistics(variable, yearly, "yearly"),
+        "seasonal_stats": seasonal_statistics(variable, yearly, monthly, "yearly"),
+        "warnings": [],
+    }
+
+
 def _r(x):
     return None if pd.isna(x) else round(float(x), 2)
+
+COMPARED_SCENARIOS = ("ssp126", "ssp585")
+
+
+def projection_pair(variable: str, start_year: int, end_year: int, lat: float, lng: float) -> dict:
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = {s: pool.submit(projection, variable, s, start_year, end_year, lat, lng) for s in COMPARED_SCENARIOS}
+        results = {s: f.result() for s, f in futures.items()}
+
+    def yearly(res: dict) -> pd.Series:
+        return pd.Series({int(d["date"]): d["value"] for d in res["data"]}, dtype=float)
+
+    a, b = (yearly(results[s]) for s in COMPARED_SCENARIOS)
+    common = a.index.intersection(b.index)
+    comparison = compare_scenarios(a[common], b[common], *(SSP_SCENARIOS[s] for s in COMPARED_SCENARIOS))
+    first = results[COMPARED_SCENARIOS[0]]
+    sources = sorted({r["source"] for r in results.values()})
+    return {
+        "status": "successful",
+        "variable": variable,
+        "label": first["label"],
+        "frequency": "yearly",
+        "unit": first["unit"],
+        "years": [start_year, end_year],
+        "scenarios": results,
+        "comparison": comparison,
+        "source": " ".join(sources),
+    }
