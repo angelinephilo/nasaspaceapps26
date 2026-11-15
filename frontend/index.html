@@ -15,7 +15,7 @@
       <button id="btn-back" class="nav-btn hidden" type="button">← Back</button>
       <button id="btn-home" class="nav-btn" type="button">Home</button>
     </div>
-    <div class="brand">Vanni the Farmer! 👩🏾‍🌾</div>
+    <div class="brand">🌾 AgriClimate Explorer</div>
     <div class="nav-right">
       <button class="nav-btn" type="button" data-modal="how-modal">How it Works</button>
       <button class="nav-btn" type="button" data-modal="about-modal">About</button>
@@ -121,37 +121,18 @@
           <option value="precipitation">Precipitation</option>
           <option value="min_temp">Minimum Temperature</option>
           <option value="max_temp">Maximum Temperature</option>
+          <option value="rx1day">Wettest day of the year</option>
+          <option value="hotdays35">Days above 35 °C</option>
         </select>
       </div>
 
       <div class="form-group">
         <label for="fut-period">Future period</label>
         <select id="fut-period"></select>
-      </div>
-      <div id="custom-years-row" class="form-row hidden">
-        <div class="form-group">
-          <label for="fut-start-year">Start year</label>
-          <input type="number" id="fut-start-year" min="2015" max="2100" />
-        </div>
-        <div class="form-group">
-          <label for="fut-end-year">End year</label>
-          <input type="number" id="fut-end-year" min="2015" max="2100" />
-        </div>
+        <p class="hint">Each period is a 20-year average (15 years for 2026–2040), compared with 1995–2014.</p>
       </div>
 
-      <fieldset class="form-group">
-        <legend>Climate scenario (SSP)</legend>
-        <div class="ssp-list">
-          <label class="ssp-option"><input type="radio" name="fut-ssp" value="ssp126" />
-            <span><strong>SSP1-2.6, Low emissions</strong><br />The world cuts greenhouse gases quickly.</span></label>
-          <label class="ssp-option"><input type="radio" name="fut-ssp" value="ssp245" checked />
-            <span><strong>SSP2-4.5, Middle of the road</strong><br />Emissions fall slowly, roughly following current trends.</span></label>
-          <label class="ssp-option"><input type="radio" name="fut-ssp" value="ssp370" />
-            <span><strong>SSP3-7.0, High emissions</strong><br />Little climate action, emissions keep rising.</span></label>
-          <label class="ssp-option"><input type="radio" name="fut-ssp" value="ssp585" />
-            <span><strong>SSP5-8.5, Very high emissions</strong><br />Worst case: heavy fossil fuel use.</span></label>
-        </div>
-      </fieldset>
+      <p class="hint">Results show two climate scenarios side by side: the best case, SSP1-2.6 (low emissions), and the worst case, SSP5-8.5 (very high emissions).</p>
 
       <p id="fut-error" class="form-error" role="alert"></p>
       <button class="primary-btn wide" type="submit">Show future projection</button>
@@ -196,15 +177,10 @@
           <div id="anomalies"></div>
         </section>
 
-        <section id="compare-periods" class="stats-section">
-          <h3>Compare two years</h3>
-          <p class="hint">Are monthly values in Year B generally higher or lower than in Year A? (Mann-Whitney U test)</p>
-          <div class="compare-row">
-            <label>Year A <select id="year-a" aria-label="Year A"></select></label>
-            <label>Year B <select id="year-b" aria-label="Year B"></select></label>
-            <button id="btn-compare" class="primary-btn" type="button">Compare</button>
-          </div>
-          <div id="compare-result"></div>
+        <section id="scenario-compare" class="stats-section hidden">
+          <h3>Best case vs worst case</h3>
+          <p class="hint">Are yearly values in the worst case (SSP5-8.5) generally different from the best case (SSP1-2.6) over the same years? (Mann-Whitney U test)</p>
+          <div id="scenario-compare-result"></div>
         </section>
 
         <div class="results-actions">
@@ -241,7 +217,7 @@
       <p>AgriClimate Explorer helps farmers see the climate of their own land using free NASA Earth data.</p>
       <ul>
         <li><strong>Historical data:</strong> NASA Giovanni (through the NASA Harmony API): GPM IMERG rainfall, GLDAS soil moisture, temperature and evapotranspiration, and MERRA-2 daily temperatures.</li>
-        <li><strong>Future data:</strong> NASA NEX-GDDP-CMIP6 downscaled climate projections.</li>
+        <li><strong>Future data:</strong> NASA NEX-GDDP-CMIP6 downscaled climate projections (GFDL-ESM4 model), as period averages compared with 1995–2014. Ready-made for South and Southeast Asia; fetched directly from NASA for other locations.</li>
       </ul>
       <p class="hint">Built for the NASA Space Apps Challenge. Maps © Google.</p>
       <button type="button" class="primary-btn" data-close>Close</button>

@@ -33,6 +33,7 @@ def mann_whitney_u(series: pd.Series, period_a: tuple[int, int], period_b: tuple
         "significant": bool(res.pvalue < ALPHA),
     }
 
+
 def compare_scenarios(a: pd.Series, b: pd.Series, a_name: str, b_name: str) -> dict:
     a, b = a.dropna(), b.dropna()
     if len(a) < 3 or len(b) < 3:

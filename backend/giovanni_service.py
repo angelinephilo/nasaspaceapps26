@@ -7,6 +7,7 @@ Series ... Service Using Python" (nasa/gesdisc-tutorials): a harmony-py Request 
 import datetime as dt
 import os
 import threading
+import time
 from collections import OrderedDict
 from functools import lru_cache
 
@@ -14,6 +15,8 @@ import requests
 from harmony import BBox, Client, Collection, Request
 
 from datasets import HISTORICAL, pick_source
+from descriptive_stats import descriptive_statistics
+from seasonal_stats import seasonal_statistics
 from processing import (
     aggregate, default_unit_for, pad_bbox, parse_giovanni_csv, summarize,
     to_base_units, to_points, unit_from_attrs, unit_label,
@@ -30,8 +33,12 @@ def harmony_client() -> Client:
     global _client
     with _client_lock:
         if _client is None:
-            token = os.getenv("EDL_TOKEN")
-            user, pw = os.getenv("EDL_USERNAME"), os.getenv("EDL_PASSWORD")
+            # Keep only the first line and trim spaces: a pasted token often carries a stray
+            # newline or a second setting, which breaks the HTTP Authorization header.
+            token = (os.getenv("EDL_TOKEN") or "").strip().splitlines()[0:1]
+            token = token[0].strip() if token else ""
+            user = (os.getenv("EDL_USERNAME") or "").strip()
+            pw = (os.getenv("EDL_PASSWORD") or "").strip()
             if token:
                 _client = Client(token=token)
             elif user and pw:
@@ -60,6 +67,19 @@ def submit(variable: str, frequency: str, start: dt.date, end: dt.date, bbox) ->
         raise ValueError(f"{HISTORICAL[variable]['label']} data starts in {first.year}.")
     start = max(start, first)
     box = pad_bbox(bbox, src.grid_deg)
+
+    # Same request already sent recently (running or finished)? Reuse that NASA job instead
+    # of queueing another one under the same Earthdata account.
+    key = (src.giovanni_var, start.isoformat(), end.isoformat(), tuple(round(v, 3) for v in box))
+    now = time.time()
+    with _submitted_lock:
+        for k, (_, t) in list(_submitted.items()):
+            if now - t > REUSE_SECONDS:
+                del _submitted[k]
+        hit = _submitted.get(key)
+        if hit and hit[0] not in _failed_jobs:
+            return hit[0], list(box)
+
     req = Request(
         collection=Collection(id=concept_id(src.short_name, src.version)),
         spatial=BBox(*box),  # (west, south, east, north)
@@ -72,7 +92,16 @@ def submit(variable: str, frequency: str, start: dt.date, end: dt.date, bbox) ->
         average="area",
     )
     job_id = harmony_client().submit(req)
+    with _submitted_lock:
+        _submitted[key] = (job_id, now)
     return job_id, list(box)
+
+
+# request key -> (harmony job id, time submitted); lets identical requests share one NASA job
+REUSE_SECONDS = 6 * 3600
+_submitted: dict = {}
+_submitted_lock = threading.Lock()
+_failed_jobs: set = set()
 
 
 # Finished results are small; keep the last ones so repeat polls don't re-download.
@@ -95,6 +124,7 @@ def job_status(job_id: str, variable: str, frequency: str) -> dict:
                "progress": info.get("progress", 0), "message": info.get("message", "")}
         if state not in RUNNING_STATES:
             out["message"] = _friendly_error(info)
+            _failed_jobs.add(job_id)  # don't hand this job to later identical requests
         return out
 
     result = build_result(job_id, variable, frequency)
@@ -122,6 +152,11 @@ def process_csv(text: str, variable: str, frequency: str) -> dict:
     unit = unit_from_attrs(attrs)
     base = to_base_units(raw, unit, meta["kind"], default_unit_for(src.giovanni_var), meta.get("soil_layer_m", 0.1))
     df = aggregate(base, meta["kind"], src.step, frequency)
+    monthly_df = df if frequency == "monthly" else aggregate(base, meta["kind"], src.step, "monthly")
+
+    series = df.loc[df["complete"], "value"]
+    monthly = monthly_df.loc[monthly_df["complete"], "value"]
+
     return {
         "status": "successful",
         "progress": 100,
@@ -132,7 +167,10 @@ def process_csv(text: str, variable: str, frequency: str) -> dict:
         "source": meta["about"],
         "giovanni_variable": src.giovanni_var,
         "data": to_points(df, frequency),
+        "monthly": to_points(monthly_df, "monthly"),
         "summary": summarize(df, frequency),
+        "descriptive_stats": descriptive_statistics(variable, series, frequency),
+        "seasonal_stats": seasonal_statistics(variable, series, monthly, frequency),
     }
 
 
