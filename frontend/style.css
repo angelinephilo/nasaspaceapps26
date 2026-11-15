@@ -167,7 +167,12 @@ th { position: sticky; top: 0; background: #f4f4f1; }
 .compare-row legend { font-weight: 600; font-size: .85rem; padding: 0 4px; }
 .compare-row select { padding: 7px; margin-left: 6px; }
 .compare-row label { font-weight: 600; display: flex; align-items: center; }
-#compare-result { margin-top: 12px; }
+#scenario-compare-result { margin-top: 8px; }
+.swatch { display: inline-block; width: 12px; height: 12px; border-radius: 3px; margin-right: 6px; vertical-align: -1px; }
+.stats-table th { font-weight: 600; }
+#trend-test h4 { margin-top: 18px; }
+.selected-row td { background: #f0f7f4; font-weight: 600; }
+#wet-dry-months p, #hot-cool-months p { margin: 6px 0; }
 
 /* ---------- Modals ---------- */
 .modal { position: fixed; inset: 0; background: rgba(0,0,0,.5); display: flex; align-items: center; justify-content: center; z-index: 1000; padding: 16px; }

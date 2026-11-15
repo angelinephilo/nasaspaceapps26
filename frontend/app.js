@@ -288,25 +288,12 @@ function readHistoricalForm() {
 
 function initFutureForm() {
   const p = $("fut-period");
-  [5, 10, 15, 20, 25, 30].forEach((n) => p.add(new Option(`Next ${n} years (${THIS_YEAR}–${THIS_YEAR + n})`, String(n))));
-  p.add(new Option("Custom range (choose years)", "custom"));
-  p.value = "20";
-  $("fut-start-year").value = THIS_YEAR;
-  $("fut-end-year").value = Math.min(THIS_YEAR + 30, 2100);
-  p.addEventListener("change", () => $("custom-years-row").classList.toggle("hidden", p.value !== "custom"));
+  FUTURE_PERIODS.forEach((x) => p.add(new Option(periodLabel(x), x)));
+  p.value = FUTURE_PERIODS[0];
 }
 
 function readFutureForm() {
-  const period = $("fut-period").value;
-  let start = THIS_YEAR, end = THIS_YEAR + parseInt(period, 10);
-  if (period === "custom") {
-    start = parseInt($("fut-start-year").value, 10);
-    end = parseInt($("fut-end-year").value, 10);
-    if (!(start >= 2015 && end <= 2100 && end > start)) return { error: "Choose years between 2015 and 2100, with the end after the start." };
-    if (end - start > 50) return { error: "Choose a period of 50 years or less." };
-  }
-  end = Math.min(end, 2100);
-  return { variable: $("fut-variable").value, ssp: document.querySelector("input[name=fut-ssp]:checked").value, start_year: start, end_year: end };
+  return { variable: $("fut-variable").value, period: $("fut-period").value };
 }
 
 /* ======================= Requests ======================= */
@@ -389,14 +376,37 @@ async function runHistorical(params) {
 
 async function runFuture(params) {
   const runId = startResults(params, "future");
-  setProgress("Collecting NASA climate projections. This can take up to a minute or two. Please keep this page open…", null);
+  setProgress("Loading NASA climate projections…", null);
+  const g = state.geometry;
+  const [start, end] = params.period.split("-").map(Number);
+  const fetchProjections = () => (g.type === "Point"
+    ? api(`/api/projections/point?lat=${g.coordinates[1]}&lon=${g.coordinates[0]}`)
+    : api("/api/projections/area", { method: "POST", body: JSON.stringify({ geometry: g }) }));
+  const testsRequest = api("/api/future/tests", {
+    method: "POST",
+    body: JSON.stringify({ variable: params.variable, start_year: start, end_year: end, geometry: g }),
+  }).catch((e) => ({ available: false, reason: e.message }));
+  const retry = { tries: 3, runId, onRetry: () => setProgress("Connection lost, trying again…", null) };
   try {
-    // If the connection drops, asking again is cheap when the server already finished (it keeps results).
-    const r = await withRetry(
-      () => api("/api/future", { method: "POST", body: JSON.stringify({ ...params, geometry: state.geometry }) }),
-      { tries: 3, runId, onRetry: () => setProgress("Connection lost, trying again…", null) },
-    );
-    if (runId === state.runId) showResult(r);
+    let proj;
+    try {
+      proj = await withRetry(fetchProjections, retry);
+    } catch (e) {
+      if (!/outside/i.test(e.message)) throw e;
+      if (runId !== state.runId) return;
+      setProgress("This farm is outside the region with ready-made projections, so they are being fetched directly from NASA. This can take up to a minute. Please keep this page open…", null);
+      proj = await withRetry(() => api("/api/future/nasa", {
+        method: "POST",
+        body: JSON.stringify({ variable: params.variable, geometry: g }),
+      }), retry);
+    }
+    if (runId !== state.runId) return;
+    const result = { kind: "projections", variable: params.variable, period: params.period, proj, tests: null };
+    showFutureResult(result);
+    const tests = await testsRequest;
+    if (runId !== state.runId) return;
+    result.tests = tests;
+    renderFutureTests(result);
   } catch (e) {
     if (runId === state.runId) showError(e.message, true);
   }
@@ -416,10 +426,10 @@ function startResults(params, kind) {
   const isHist = kind === "historical";
   $("results-title").textContent = isHist
     ? `${HIST_VARS[params.variable].label}: ${capitalize(params.frequency)} history`
-    : `${FUT_LABELS[params.variable]}: future projection`;
+    : `${FUTURE_VARS[params.variable].label}: future projection`;
   $("results-subtitle").textContent = isHist
     ? `${state.label} · ${fmtMonth(params.start)} to ${fmtMonth(params.end)}`
-    : `${state.label} · ${params.start_year}–${params.end_year} · ${SSP_LABELS[params.ssp]}`;
+    : `${state.label} · ${periodLabel(params.period)} vs ${BASELINE_LABEL} · best case (SSP1-2.6) and worst case (SSP5-8.5)`;
   $("btn-other").textContent = isHist ? "See future scenarios" : "See historical trends";
   $("progress").classList.remove("hidden");
   $("results-body").classList.add("hidden");
@@ -461,6 +471,8 @@ function showError(msg, canRetry = false) {
 function showResult(r) {
   state.lastResult = r;
   $("progress").classList.add("hidden");
+  if (r.kind === "projections") return showFutureResult(r);
+  $("scenario-compare").classList.add("hidden");
   if (!r.data || !r.data.length) return showError("No data was found for this place and time period.");
   $("results-body").classList.remove("hidden");
   $("insight").textContent = buildInsight(r);
@@ -623,6 +635,7 @@ function renderTable(r) {
 function downloadCsv() {
   const r = state.lastResult;
   if (!r) return;
+  if (r.kind === "projections") return downloadFutureCsv(r);
   const fut = isFuture(r);
   const rows = [fut ? ["year", "average", "lowest_model", "highest_model"] : ["date", "value", "complete"]];
   r.data.forEach((d) => rows.push(fut ? [d.date, d.value, d.low, d.high] : [d.date, d.value, d.complete]));
@@ -647,6 +660,7 @@ function txt(x) { return blank(x) ? BLANK : esc(x); }
 function val(x, unit = "") { return blank(x) ? BLANK : `${fmtNum(x)}${unit ? (unit === "%" ? "%" : " " + esc(unit)) : ""}`; }
 function signed(x, unit = "") { return blank(x) ? BLANK : (x > 0 ? "+" : "") + val(x, unit); }
 function pval(p) { return blank(p) ? BLANK : p < 0.001 ? "&lt; 0.001" : Number(p).toFixed(3); }
+function pText(p) { return blank(p) ? `p = ${BLANK}` : p < 0.001 ? "p &lt; 0.001" : `p = ${Number(p).toFixed(3)}`; }
 function yrs(y) { return Array.isArray(y) && y.length === 2 ? `${y[0]}–${y[1]}` : BLANK; }
 
 function varGroup(variable) {
@@ -668,7 +682,6 @@ function trendUnit(r) {
 function renderStatistics(r) {
   loadDescriptiveStats(r);
   loadSeasonalStats(r);
-  setupCompare(r);
 }
 
 function loadDescriptiveStats(result) {
@@ -834,75 +847,298 @@ function renderAnomalies(result, a) {
     </table></div>`;
 }
 
-function compareSource(result) {
-  if (Array.isArray(result.monthly) && result.monthly.length) return result.monthly;
-  if (result.frequency === "monthly" || result.frequency === "daily") return result.data;
-  return [];
+const SCENARIOS = [
+  { key: "ssp126", name: "SSP1-2.6", case: "Best case", desc: "low emissions", color: "#2a78d6" },
+  { key: "ssp585", name: "SSP5-8.5", case: "Worst case", desc: "very high emissions", color: "#eb6834" },
+];
+const BASELINE_COLOR = "#7a7974";
+const BASELINE_LABEL = "1995–2014";
+const FUTURE_PERIODS = ["2026-2040", "2041-2060", "2061-2080", "2081-2100"];
+const FUTURE_VARS = {
+  precipitation: { label: "Precipitation", annual: "pr_annual", monthly: "pr_monthly", unit: "mm/year", base: "mm", group: "precip", percent: true, noun: "yearly rainfall" },
+  min_temp: { label: "Minimum Temperature", annual: "tasmin_annual", monthly: "tasmin_monthly", unit: "°C", base: "°C", group: "temp", noun: "the average daily minimum temperature" },
+  max_temp: { label: "Maximum Temperature", annual: "tasmax_annual", monthly: "tasmax_monthly", unit: "°C", base: "°C", group: "temp", noun: "the average daily maximum temperature" },
+  rx1day: { label: "Wettest day of the year", annual: "rx1day", monthly: null, unit: "mm/day", base: "mm", group: "precip", percent: true, noun: "rain on the wettest day of the year" },
+  hotdays35: { label: "Days above 35 °C", annual: "hotdays35", monthly: null, unit: "days/year", base: "days", group: "count", noun: "the number of days above 35 °C" },
+};
+
+function periodLabel(p) { return String(p).replace("-", "–"); }
+
+function setTiles(tiles) {
+  $("stat-grid").innerHTML = "";
+  for (const [label, value, note] of tiles) {
+    const d = document.createElement("div");
+    d.className = "stat";
+    d.innerHTML = `<div class="stat-label"></div><div class="stat-value"></div><div class="stat-note"></div>`;
+    d.children[0].textContent = label;
+    d.children[1].textContent = value;
+    d.children[2].textContent = note;
+    $("stat-grid").appendChild(d);
+  }
 }
 
-function setupCompare(result) {
-  const section = $("compare-periods");
-  const source = compareSource(result).filter((d) => d.complete !== false && d.value != null);
-  const years = [...new Set(source.map((d) => +String(d.date).slice(0, 4)))].sort((x, y) => x - y);
-  if (years.length < 2) {
-    section.classList.add("hidden");
+function projValue(r, scenario, period, field) {
+  const p = r.proj.projections?.[`${scenario}_${period}`];
+  return p ? p[field] : null;
+}
+
+function changeText(r, value) {
+  const v = FUTURE_VARS[r.variable];
+  const base = r.proj.baseline?.[v.annual];
+  if (blank(value) || blank(base)) return BLANK;
+  const d = value - base;
+  let t = `${d > 0 ? "+" : ""}${fmtNum(d)} ${v.unit}`;
+  if (v.percent && base) t += ` (${d > 0 ? "+" : ""}${fmtNum((d / base) * 100)}%)`;
+  return t;
+}
+
+function showFutureResult(r) {
+  state.lastResult = r;
+  $("progress").classList.add("hidden");
+  $("results-error").textContent = "";
+  const v = FUTURE_VARS[r.variable];
+  const base = r.proj.baseline?.[v.annual];
+  if (blank(base)) return showError("No projection data was found for this place.", true);
+  $("results-body").classList.remove("hidden");
+  const best = projValue(r, "ssp126", r.period, v.annual);
+  const worst = projValue(r, "ssp585", r.period, v.annual);
+  const P = periodLabel(r.period);
+  $("insight").textContent =
+    `In ${P}, ${v.noun} at your farm is projected to be ${fmtNum(best)} ${v.unit} in the best case (${changeText(r, best)} compared with ${BASELINE_LABEL}) ` +
+    `and ${fmtNum(worst)} ${v.unit} in the worst case (${changeText(r, worst)}). The ${BASELINE_LABEL} average was ${fmtNum(base)} ${v.unit}.`;
+  setTiles([
+    [`${BASELINE_LABEL} average`, fmtNum(base), v.unit],
+    [`Best case, ${P}`, blank(best) ? "–" : fmtNum(best), `${v.unit} · ${changeText(r, best)}`],
+    [`Worst case, ${P}`, blank(worst) ? "–" : fmtNum(worst), `${v.unit} · ${changeText(r, worst)}`],
+    ["Worst minus best", blank(best) || blank(worst) ? "–" : (worst - best > 0 ? "+" : "") + fmtNum(worst - best), v.unit],
+  ]);
+  renderProjectionChart(r);
+  renderProjectionTable(r);
+  renderProjectionChanges(r);
+  renderProjectionSeasonal(r);
+  $("trend-test").innerHTML = `<h4>Is the trend real? (Mann-Kendall test + Sen's slope)</h4><p class="hint">Loading statistical tests… this can take up to a minute when the yearly values come from NASA.</p>`;
+  $("scenario-compare").classList.remove("hidden");
+  $("scenario-compare-result").innerHTML = `<p class="hint">Loading…</p>`;
+  const where = r.proj.mode === "nasa"
+    ? `Fetched directly from NASA NCCS for the grid cell at your farm's centre (${r.proj.lat}, ${r.proj.lon}); each period is estimated from ${r.proj.sample_years} sample years.`
+    : r.proj.mode === "area"
+    ? `Averaged over ${r.proj.baseline.n_cells} grid cells inside your boundary.`
+    : r.proj.mode === "centroid"
+      ? "Your field is smaller than one grid cell, so values are for the cell at its centre."
+      : "Values for the grid cell at your pin.";
+  $("results-source").textContent = `Source: NASA NEX-GDDP-CMIP6 downscaled climate projections (about 25 km), GFDL-ESM4 model. Period averages. ${where}`;
+}
+
+function renderProjectionChart(r) {
+  if (chart) chart.destroy();
+  const v = FUTURE_VARS[r.variable];
+  const base = r.proj.baseline[v.annual];
+  const labels = [[BASELINE_LABEL, "(baseline)"], ...FUTURE_PERIODS.map(periodLabel)];
+  const sel = FUTURE_PERIODS.indexOf(r.period) + 1;
+  const datasets = SCENARIOS.map((sc) => ({
+    label: `${sc.case} (${sc.name})`,
+    data: [base, ...FUTURE_PERIODS.map((p) => projValue(r, sc.key, p, v.annual))],
+    borderColor: sc.color,
+    backgroundColor: sc.color,
+    borderWidth: 2,
+    pointRadius: labels.map((_, i) => (i === sel ? 7 : 4)),
+    pointHoverRadius: 8,
+    pointBorderColor: "#fcfcfb",
+    pointBorderWidth: 2,
+    tension: 0,
+    spanGaps: true,
+  }));
+  datasets.push({
+    label: `${BASELINE_LABEL} average`,
+    data: labels.map(() => base),
+    borderColor: BASELINE_COLOR,
+    borderDash: [5, 5],
+    borderWidth: 1.5,
+    pointRadius: 0,
+    pointHoverRadius: 0,
+    isTrend: true,
+  });
+  chart = new Chart($("results-chart"), {
+    type: "line",
+    data: { labels, datasets },
+    options: {
+      maintainAspectRatio: false,
+      interaction: { mode: "index", intersect: false },
+      plugins: {
+        legend: { display: true, position: "top", align: "start", labels: { color: "#0b0b0b", boxWidth: 14, boxHeight: 3 } },
+        tooltip: {
+          filter: (item) => !item.dataset.isTrend,
+          callbacks: {
+            title: (items) => [].concat(items[0].label).join(" "),
+            label: (ctx) => ` ${ctx.dataset.label}: ${fmtNum(ctx.parsed.y)} ${v.unit}` + (ctx.dataIndex ? `  (${changeText(r, ctx.parsed.y)})` : ""),
+          },
+        },
+      },
+      scales: {
+        x: { grid: { display: false }, ticks: { color: "#52514e" } },
+        y: {
+          beginAtZero: v.group !== "temp",
+          grid: { color: "#ecebe6" },
+          border: { display: false },
+          ticks: { color: "#52514e" },
+          title: { display: true, text: v.unit, color: "#52514e" },
+        },
+      },
+    },
+  });
+  $("results-chart").setAttribute("aria-label", `${v.label}: ${BASELINE_LABEL} baseline and each future period, best case and worst case.`);
+}
+
+function renderProjectionTable(r) {
+  const v = FUTURE_VARS[r.variable];
+  const t = $("results-table");
+  t.innerHTML = "";
+  const head = t.createTHead().insertRow();
+  ["Period", ...SCENARIOS.map((sc) => `${sc.case}, ${sc.name} (${v.unit})`)].forEach((h) => {
+    const th = document.createElement("th");
+    th.textContent = h;
+    head.appendChild(th);
+  });
+  const body = t.createTBody();
+  const base = r.proj.baseline[v.annual];
+  const row0 = body.insertRow();
+  [`${BASELINE_LABEL} (baseline)`, fmtNum(base), fmtNum(base)].forEach((c) => (row0.insertCell().textContent = c));
+  for (const p of FUTURE_PERIODS) {
+    const row = body.insertRow();
+    [periodLabel(p), ...SCENARIOS.map((sc) => fmtNum(projValue(r, sc.key, p, v.annual)))].forEach((c) => (row.insertCell().textContent = c));
+  }
+}
+
+function downloadFutureCsv(r) {
+  const v = FUTURE_VARS[r.variable];
+  const base = r.proj.baseline[v.annual];
+  const rows = [["period", "best_case_ssp126", "worst_case_ssp585"], [`${BASELINE_LABEL} baseline`, base, base],
+    ...FUTURE_PERIODS.map((p) => [p, ...SCENARIOS.map((sc) => projValue(r, sc.key, p, v.annual) ?? "")])];
+  const meta = [`# ${v.label} (${v.unit})`, `# Location: ${state.label}`, "# Source: NASA NEX-GDDP-CMIP6, GFDL-ESM4, period averages"];
+  const csv = meta.join("\n") + "\n" + rows.map((x) => x.join(",")).join("\n");
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
+  a.download = `${r.variable}_best_vs_worst_case.csv`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
+function swatchHead() {
+  return `<thead><tr><th></th>${SCENARIOS.map((x) => `<th><span class="swatch" style="background:${x.color}"></span>${x.case} <span class="muted">(${x.name})</span></th>`).join("")}</tr></thead>`;
+}
+
+function renderProjectionChanges(r) {
+  const v = FUTURE_VARS[r.variable];
+  $("mean-change").innerHTML = `
+    <h4>Change from ${BASELINE_LABEL}</h4>
+    <div class="stats-table"><table>${swatchHead()}
+      <tbody>${FUTURE_PERIODS.map((p) => `<tr${p === r.period ? ' class="selected-row"' : ""}><td>${periodLabel(p)}</td>${SCENARIOS.map((sc) => {
+        const x = projValue(r, sc.key, p, v.annual);
+        return `<td>${val(x, v.unit)} <span class="muted">${esc(changeText(r, x))}</span></td>`;
+      }).join("")}</tr>`).join("")}</tbody>
+    </table></div>`;
+}
+
+function trendVerdict(t) {
+  if (!t || typeof t.significant !== "boolean") return BLANK;
+  return t.significant ? `✅ significant ${esc(t.direction)}` : "➖ no significant trend";
+}
+
+function renderFutureTests(r) {
+  const t = r.tests || {};
+  const v = FUTURE_VARS[r.variable];
+  const P = periodLabel(r.period);
+  if (!t.available) {
+    const why = esc(t.reason || "Not available.");
+    $("trend-test").innerHTML = `<h4>Is the trend real? (Mann-Kendall test + Sen's slope)</h4>
+      <p class="hint">Year-by-year tests for ${P} aren't available: ${why}</p>`;
+    $("scenario-compare-result").innerHTML = `<p class="hint">The Mann-Whitney U test for ${P} isn't available: ${why}</p>`;
     return;
   }
-  section.classList.remove("hidden");
-  for (const [id, def] of [["year-a", years[0]], ["year-b", years[years.length - 1]]]) {
-    const sel = $(id);
-    sel.innerHTML = "";
-    years.forEach((y) => sel.add(new Option(String(y), String(y))));
-    sel.value = String(def);
-  }
-  $("btn-compare").onclick = () => comparePeriods(result);
-  renderComparison(result, null);
-}
-
-function selectedYears() {
-  return { a: +$("year-a").value, b: +$("year-b").value };
-}
-
-async function comparePeriods(result) {
-  const { a, b } = selectedYears();
-  if (a === b) {
-    renderComparison(result, null, "Choose two different years.");
-    return;
-  }
-  const values = compareSource(result)
-    .filter((d) => d.complete !== false && d.value != null)
-    .filter((d) => [a, b].includes(+String(d.date).slice(0, 4)))
-    .map((d) => ({ date: d.date, value: d.value }));
-  $("btn-compare").disabled = true;
-  try {
-    const res = await api("/api/stats/compare", {
-      method: "POST",
-      body: JSON.stringify({ variable: result.variable, values, period_a: [a, a], period_b: [b, b] }),
-    });
-    renderComparison(result, res);
-  } catch (e) {
-    renderComparison(result, null, e.message);
-  } finally {
-    $("btn-compare").disabled = false;
-  }
-}
-
-function renderComparison(result, c, error) {
-  const { a, b } = selectedYears();
-  const g = varGroup(result.variable);
-  const daily = result.frequency === "daily" && !(Array.isArray(result.monthly) && result.monthly.length);
-  const unit = g === "temp" ? "°C" : g === "soil" ? "%" : daily ? "mm/day" : "mm/month";
-  const per = daily ? "day" : "month";
+  const u = `${v.base} per decade`;
+  const cell = (fn) => SCENARIOS.map((sc) => `<td>${fn(t.trends?.[sc.key] || {})}</td>`).join("");
+  $("trend-test").innerHTML = `
+    <h4>Is the trend real within ${P}? (Mann-Kendall test + Sen's slope)</h4>
+    <div class="stats-table"><table>${swatchHead()}
+      <tbody>
+        <tr><td>Trend</td>${cell((s) => trendVerdict(s.mann_kendall_sens_slope))}</tr>
+        <tr><td>Sen's slope</td>${cell((s) => signed(s.mann_kendall_sens_slope?.sens_slope_per_decade, u))}</tr>
+        <tr><td>Mann-Kendall p-value</td>${cell((s) => pval(s.mann_kendall_sens_slope?.p))}</tr>
+        <tr><td>Kendall's tau</td>${cell((s) => val(s.mann_kendall_sens_slope?.tau))}</tr>
+        <tr><td>Regression slope</td>${cell((s) => signed(s.regression_line?.slope_per_decade, u))}</tr>
+        <tr><td>Regression R²</td>${cell((s) => val(s.regression_line?.r2))}</tr>
+      </tbody>
+    </table></div>
+    <p class="hint">Uses one value per year within ${P}${t.source === "nasa" ? ", fetched from NASA NCCS" : ""}. A trend is statistically significant when p &lt; 0.05.</p>`;
+  const c = t.comparison;
   let verdict = BLANK;
   if (c && typeof c.significant === "boolean") {
     verdict = c.significant ? "✅ a statistically significant difference" : "➖ no statistically significant difference";
   }
-  $("compare-result").innerHTML = `
-    <p class="insight">In <strong>${b}</strong>, ${per}ly values averaged <strong>${val(c?.period_b?.mean, unit)}</strong>,
-    compared with <strong>${val(c?.period_a?.mean, unit)}</strong> in <strong>${a}</strong>:
-    a difference of <strong>${signed(c?.difference, unit)}</strong> (${signed(c?.percent_change, "%")}).
-    Mann-Whitney U = ${val(c?.u)}, p = ${pval(c?.p)}, which means <strong>${verdict}</strong>.</p>
-    ${error ? `<p class="form-error">${esc(error)}</p>` : ""}`;
+  $("scenario-compare-result").innerHTML = `
+    <p class="insight">Over ${P}, ${esc(v.noun)} is on average <strong>${val(c?.scenario_b?.mean, v.unit)}</strong> in the worst case (SSP5-8.5),
+    compared with <strong>${val(c?.scenario_a?.mean, v.unit)}</strong> in the best case (SSP1-2.6):
+    a difference of <strong>${signed(c?.difference, v.unit)}</strong> (${signed(c?.percent_change, "%")}).
+    Mann-Whitney U = ${val(c?.u)}, ${pText(c?.p)}, which means <strong>${verdict}</strong>.</p>
+    <p class="hint">Uses ${txt(c?.scenario_a?.n)} yearly values from each scenario. The point at the farm's centre is used for these tests.</p>`;
+}
+
+function renderProjectionSeasonal(r) {
+  const v = FUTURE_VARS[r.variable];
+  const section = $("seasonal-stats");
+  ["wet-dry-months", "hot-cool-months", "extremes", "anomalies"].forEach((id) => ($(id).innerHTML = ""));
+  if (!v.monthly) {
+    section.classList.add("hidden");
+    return;
+  }
+  section.classList.remove("hidden");
+  if (seasonalChart) seasonalChart.destroy();
+  const P = periodLabel(r.period);
+  const series = [
+    { name: `${BASELINE_LABEL} baseline`, color: BASELINE_COLOR, values: r.proj.baseline[v.monthly], dash: true },
+    ...SCENARIOS.map((sc) => ({ name: `${sc.case} (${sc.name}), ${P}`, color: sc.color, values: projValue(r, sc.key, r.period, v.monthly) })),
+  ].filter((x) => Array.isArray(x.values) && x.values.length === 12);
+  const bars = v.group === "precip";
+  seasonalChart = new Chart($("seasonal-chart"), {
+    type: bars ? "bar" : "line",
+    data: {
+      labels: MONTH_SHORT,
+      datasets: series.map((x) => ({
+        label: x.name,
+        data: x.values,
+        borderColor: x.color,
+        backgroundColor: x.color,
+        borderWidth: bars ? 0 : 2,
+        borderDash: !bars && x.dash ? [5, 5] : [],
+        borderRadius: 4,
+        pointRadius: 3,
+        tension: 0.3,
+      })),
+    },
+    options: {
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: true, position: "top", align: "start", labels: { color: "#0b0b0b", boxWidth: 14 } },
+        title: { display: true, text: "Average for each calendar month", color: "#52514e", font: { weight: "normal" } },
+        tooltip: { callbacks: { label: (ctx) => ` ${ctx.dataset.label}: ${fmtNum(ctx.parsed.y)} ${v.base}` } },
+      },
+      scales: {
+        x: { grid: { display: false }, ticks: { color: "#52514e" } },
+        y: { beginAtZero: bars, grid: { color: "#ecebe6" }, border: { display: false }, ticks: { color: "#52514e" },
+             title: { display: true, text: bars ? "mm per month" : v.base, color: "#52514e" } },
+      },
+      datasets: { bar: { categoryPercentage: 0.85, barPercentage: 0.9 } },
+    },
+  });
+  const [hi, lo] = v.group === "precip" ? ["wettest", "driest"] : ["hottest", "coolest"];
+  const lines = series.map((x) => {
+    const iHi = x.values.indexOf(Math.max(...x.values));
+    const iLo = x.values.indexOf(Math.min(...x.values));
+    return `<p><span class="swatch" style="background:${x.color}"></span><strong>${esc(x.name)}:</strong>
+      ${hi} month <strong>${MONTHS[iHi]}</strong> (${val(x.values[iHi], v.base)}), ${lo} month <strong>${MONTHS[iLo]}</strong> (${val(x.values[iLo], v.base)}).</p>`;
+  }).join("");
+  $(v.group === "precip" ? "wet-dry-months" : "hot-cool-months").innerHTML =
+    `<h4>${capitalize(hi)} and ${lo} months</h4><p class="hint">Calendar months, averaged over each period.</p>${lines}`;
 }
 
 /* ======================= Helpers ======================= */

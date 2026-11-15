@@ -7,3 +7,4 @@ requests>=2.32,<3
 scipy>=1.13,<2
 xarray>=2024.6
 netCDF4>=1.7
+shapely>=2.0

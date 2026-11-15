@@ -1,5 +1,4 @@
 import os
-import threading
 from functools import lru_cache
 from pathlib import Path
 
@@ -7,11 +6,13 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 
+from netcdf_lock import NC_LOCK as _io_lock
+
 LOCAL_DIR = Path(os.getenv("LOCAL_CMIP6_DIR", Path(__file__).resolve().parent / "data" / "annual"))
 LOCAL_MODEL = os.getenv("LOCAL_CMIP6_MODEL", "GFDL-ESM4")
 VARIABLES = {"precipitation": "pr_m", "min_temp": "tasmin_m", "max_temp": "tasmax_m"}
+YEARLY_VARIABLES = {"rx1day": "rx1day", "hotdays35": "hotdays35"}
 SEARCH_CELLS = 2
-_io_lock = threading.RLock()
 
 
 def file_for(exp: str, year: int) -> Path:
@@ -81,3 +82,17 @@ def yearly_from_monthly(monthly: pd.Series, variable: str) -> pd.Series:
     yearly = yearly[g.count() == 12]
     yearly.index = pd.to_datetime(yearly.index.astype(str) + "-01-01")
     return yearly
+
+
+def yearly_point(exp: str, variable: str, lat: float, lng: float, years: list[int]) -> pd.Series:
+    name = YEARLY_VARIABLES[variable]
+    cell = _cell(exp, round(lat, 3), round(lng, 3))
+    if cell is None:
+        raise ValueError("No land data near this location in the local climate files.")
+    out = {}
+    for y in years:
+        with _io_lock, xr.open_dataset(file_for(exp, y)) as ds:
+            out[y] = float(ds[name].sel(lat=cell[0], lon=cell[1]).values)
+    s = pd.Series(out, dtype=float).dropna()
+    s.index = pd.to_datetime(s.index.astype(str) + "-01-01")
+    return s
